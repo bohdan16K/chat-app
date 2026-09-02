@@ -39,7 +39,16 @@
   const usernameInput = document.getElementById('username');
   const messages = document.getElementById('messages');
 
-  // Відправка повідомлення на сервер
+  // 1. Прийом історії повідомлень із MongoDB під час підключення
+  socket.on('chatHistory', (history) => {
+    messages.innerHTML = ''; // Очищаємо контейнер
+    history.forEach((data) => {
+      appendMessage(data);
+    });
+    messages.scrollTop = messages.scrollHeight;
+  });
+
+  // 2. Відправка повідомлення на сервер
   chatForm.addEventListener('submit', (e) => {
     e.preventDefault();
     const user = usernameInput.value.trim();
@@ -52,16 +61,19 @@
     }
   });
 
-  // Отримання повідомлення від сервера
+  // 3. Отримання нового повідомлення від сервера в реальному часі
   socket.on('chatMessage', (data) => {
+    appendMessage(data);
+    messages.scrollTop = messages.scrollHeight;
+  });
+
+  // Допоміжна функція для створення HTML-елемента повідомлення
+  function appendMessage(data) {
     const msgDiv = document.createElement('div');
     msgDiv.classList.add('message');
     msgDiv.innerHTML = `<span>${data.user}</span>${data.text}`;
     messages.appendChild(msgDiv);
-    
-    // Автоматичний скролл вниз
-    messages.scrollTop = messages.scrollHeight;
-  });
+  }
 </script>
 
 </body>
