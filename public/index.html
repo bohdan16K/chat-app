@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Real-Time Chat</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: Arial, sans-serif; background-color: #f4f7f6; display: flex; justify-content: center; align-items: center; height: 100vh; }
+    .chat-container { width: 400px; height: 550px; background: #fff; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); display: flex; flex-direction: column; overflow: hidden; }
+    .chat-header { background: #007bff; color: #fff; padding: 15px; text-align: center; font-size: 1.2rem; font-weight: bold; }
+    .chat-messages { flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+    .message { background: #e9ecef; padding: 8px 12px; border-radius: 8px; max-width: 80%; word-wrap: break-word; }
+    .message span { font-weight: bold; color: #007bff; display: block; font-size: 0.85rem; }
+    .chat-form { display: flex; padding: 10px; background: #eee; border-top: 1px solid #ddd; }
+    .chat-form input[type="text"] { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; outline: none; }
+    .chat-form input#username { width: 90px; margin-right: 5px; }
+    .chat-form button { background: #007bff; color: white; border: none; padding: 10px 15px; margin-left: 5px; border-radius: 4px; cursor: pointer; }
+    .chat-form button:hover { background: #0056b3; }
+  </style>
+</head>
+<body>
+
+<div class="chat-container">
+  <div class="chat-header">Чат в реальному часі</div>
+  <div class="chat-messages" id="messages"></div>
+  <form class="chat-form" id="chatForm">
+    <input type="text" id="username" placeholder="Нікнейм" required />
+    <input type="text" id="messageInput" placeholder="Введіть повідомлення..." required autocomplete="off" />
+    <button type="submit">Надіслати</button>
+  </form>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const socket = io();
+  const chatForm = document.getElementById('chatForm');
+  const messageInput = document.getElementById('messageInput');
+  const usernameInput = document.getElementById('username');
+  const messages = document.getElementById('messages');
+
+  // Відправка повідомлення на сервер
+  chatForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const user = usernameInput.value.trim();
+    const text = messageInput.value.trim();
+
+    if (user && text) {
+      socket.emit('chatMessage', { user, text });
+      messageInput.value = '';
+      messageInput.focus();
+    }
+  });
+
+  // Отримання повідомлення від сервера
+  socket.on('chatMessage', (data) => {
+    const msgDiv = document.createElement('div');
+    msgDiv.classList.add('message');
+    msgDiv.innerHTML = `<span>${data.user}</span>${data.text}`;
+    messages.appendChild(msgDiv);
+    
+    // Автоматичний скролл вниз
+    messages.scrollTop = messages.scrollHeight;
+  });
+</script>
+
+</body>
+</html>
