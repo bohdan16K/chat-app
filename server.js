@@ -7,18 +7,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// 1. Підключення до MongoDB Atlas
-const MONGO_URI = process.env.MONGO_URI;
-
-if (MONGO_URI) {
-  mongoose.connect(MONGO_URI)
-    .then(() => console.log('Успішно підключено до MongoDB'))
-    .catch((err) => console.error('Помилка підключення до MongoDB:', err));
-} else {
-  console.warn('УВАГА: MONGO_URI не вказано в змінних середовища!');
-}
-
-// 2. Схема та модель повідомлення
+// 1. Схема та модель повідомлення
 const messageSchema = new mongoose.Schema({
   user: String,
   text: String,
@@ -29,26 +18,26 @@ const Message = mongoose.model('Message', messageSchema);
 
 app.use(express.static('public'));
 
+// 2. Обробка з'єднань Socket.IO
 io.on('connection', async (socket) => {
   console.log('Користувач підключився');
 
-  // 3. Завантаження та відправка історії повідомлень новому користувачеві
+  // Відправка історії повідомлень
   try {
     const history = await Message.find().sort({ createdAt: 1 }).limit(50);
-    socket.emit('chat history', history);
+    socket.emit('chatHistory', history);
   } catch (err) {
-    console.error('Помилка завантаження історії:', err);
+    console.error('Помилка завантаження історії з БД:', err);
   }
 
-  // 4. Обробка та збереження нового повідомлення
-  socket.on('chat message', async (msg) => {
+  // Прийом нового повідомлення від клієнта
+  socket.on('chatMessage', async (data) => {
     try {
-      // Зберігаємо в базі даних
       const newMessage = new Message({ user: data.user, text: data.text });
       await newMessage.save();
 
-      // Розсилаємо усім підключеним клієнтам
-      io.emit('chat message', data);
+      // Розсилка всім підключеним клієнтам
+      io.emit('chatMessage', data);
     } catch (err) {
       console.error('Помилка збереження повідомлення:', err);
     }
@@ -59,7 +48,25 @@ io.on('connection', async (socket) => {
   });
 });
 
+// 3. Асинхронне підключення до БД та запуск сервера
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Сервер запущено на порту ${PORT}`);
-});
+const MONGO_URI = process.env.MONGO_URI;
+
+async function start() {
+  try {
+    if (!MONGO_URI) {
+      throw new Error('MONGO_URI не вказано в змінних середовища Render!');
+    }
+    
+    await mongoose.connect(MONGO_URI);
+    console.log('Успішно підключено до MongoDB');
+
+    server.listen(PORT, () => {
+      console.log(`Сервер запущено на порту ${PORT}`);
+    });
+  } catch (err) {
+    console.error('Помилка запуску сервера:', err);
+  }
+}
+
+start();
