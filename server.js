@@ -5,7 +5,7 @@ const mongoose = require('mongoose');
 const cookieParser = require('cookie-parser');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const cookie = require('cookie');
+
 
 const app = express();
 const server = http.createServer(app);
@@ -137,9 +137,11 @@ io.use((socket, next) => {
   const reqCookies = socket.handshake.headers.cookie;
   if (!reqCookies) return next(new Error('Auth error'));
 
-  const parsedCookies = cookie.parse(reqCookies);
-  const token = parsedCookies.token;
-  if (!token) return next(new Error('Auth error'));
+  // Дістаємо токен вручну без сторонніх бібліотек
+  const tokenCookie = reqCookies.split(';').find(c => c.trim().startsWith('token='));
+  if (!tokenCookie) return next(new Error('Auth error'));
+
+  const token = tokenCookie.split('=')[1]; // Отримуємо саме значення токена
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
