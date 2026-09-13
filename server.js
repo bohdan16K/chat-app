@@ -222,7 +222,7 @@ io.on('connection', async (socket) => {
   socket.join(username);
 
   // 3. Додаємо юзера в онлайн і сповіщаємо всіх
-  onlineUsers.add(username);
+  onlineUsers.set(username);
   io.emit('onlineUsers', Array.from(onlineUsers));
 
   // 4. Відправка історії загального чату під час підключення
