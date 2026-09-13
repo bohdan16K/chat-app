@@ -1,33 +1,297 @@
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: Arial, sans-serif; background-color: #f4f7f6; display: flex; justify-content: center; align-items: center; height: 100vh; }
-.hidden { display: none !important; }
+* { 
+  box-sizing: border-box; 
+  margin: 0; 
+  padding: 0; 
+}
 
-/* Контейнери */
-.app-container { width: 400px; background: #fff; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); overflow: hidden; }
+body { 
+  font-family: Arial, sans-serif; 
+  background-color: #f4f7f6; 
+  display: flex; 
+  justify-content: center; 
+  align-items: center; 
+  height: 100vh; 
+  overflow: hidden;
+}
 
-/* Форма авторизації */
-.auth-box { padding: 25px; display: flex; flex-direction: column; gap: 15px; }
-.auth-box h2 { text-align: center; color: #007bff; margin-bottom: 5px; }
-.form-group { display: flex; flex-direction: column; gap: 5px; }
-.form-group label { font-size: 0.9rem; color: #333; }
+.hidden { 
+  display: none !important; 
+}
+
+/* Глобальний контейнер */
+.app-container { 
+  width: 100%; 
+  height: 100vh; 
+  display: flex; 
+  justify-content: center; 
+  align-items: center; 
+}
+
+/* ==========================================
+   1. ФОРМА АВТОРИЗАЦІЇ (Центрована картка 400px)
+   ========================================== */
+.auth-box { 
+  width: 100%;
+  max-width: 400px;
+  background: #fff; 
+  padding: 25px; 
+  border-radius: 10px; 
+  box-shadow: 0 4px 10px rgba(0,0,0,0.1); 
+  display: flex; 
+  flex-direction: column; 
+  gap: 15px; 
+}
+
+.auth-box h2 { 
+  text-align: center; 
+  color: #007bff; 
+  margin-bottom: 5px; 
+}
+
+.form-group { 
+  display: flex; 
+  flex-direction: column; 
+  gap: 5px; 
+}
+
+.form-group label { 
+  font-size: 0.9rem; 
+  color: #333; 
+}
+
 .form-group input[type="text"], 
-.form-group input[type="password"] { padding: 10px; border: 1px solid #ccc; border-radius: 4px; outline: none; }
-.checkbox-group { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; cursor: pointer; }
-.auth-buttons { display: flex; gap: 10px; }
-.btn { flex: 1; padding: 10px; border: none; border-radius: 4px; background: #007bff; color: white; cursor: pointer; font-weight: bold; }
-.btn:hover { background: #0056b3; }
-.btn-secondary { background: #6c757d; }
-.btn-secondary:hover { background: #5a6268; }
+.form-group input[type="password"] { 
+  padding: 10px; 
+  border: 1px solid #ccc; 
+  border-radius: 4px; 
+  outline: none; 
+}
 
-/* Чат */
-.chat-container { height: 550px; display: flex; flex-direction: column; }
-.chat-header { background: #007bff; color: #fff; padding: 15px; display: flex; justify-content: space-between; align-items: center; font-size: 1rem; font-weight: bold; }
-.logout-btn { background: rgba(255,255,255,0.2); border: 1px solid #fff; color: #fff; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
-.logout-btn:hover { background: rgba(255,255,255,0.4); }
-.chat-messages { flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
-.message { background: #e9ecef; padding: 8px 12px; border-radius: 8px; max-width: 80%; word-wrap: break-word; }
-.message span { font-weight: bold; color: #007bff; display: block; font-size: 0.85rem; }
-.chat-form { display: flex; padding: 10px; background: #eee; border-top: 1px solid #ddd; }
-.chat-form input[type="text"] { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; outline: none; }
-.chat-form button { background: #007bff; color: white; border: none; padding: 10px 15px; margin-left: 5px; border-radius: 4px; cursor: pointer; }
-.chat-form button:hover { background: #0056b3; }
+.form-group input:focus {
+  border-color: #007bff;
+}
+
+.checkbox-group { 
+  display: flex; 
+  align-items: center; 
+  gap: 8px; 
+  font-size: 0.9rem; 
+  cursor: pointer; 
+}
+
+.auth-buttons { 
+  display: flex; 
+  gap: 10px; 
+}
+
+.btn { 
+  flex: 1; 
+  padding: 10px; 
+  border: none; 
+  border-radius: 4px; 
+  background: #007bff; 
+  color: white; 
+  cursor: pointer; 
+  font-weight: bold; 
+}
+
+.btn:hover { 
+  background: #0056b3; 
+}
+
+.btn-secondary { 
+  background: #6c757d; 
+}
+
+.btn-secondary:hover { 
+  background: #5a6268; 
+}
+
+/* ==========================================
+   2. ДВОКОЛОНКОВИЙ ІНТЕРФЕЙС ЧАТУ
+   ========================================== */
+.chat-app { 
+  width: 100%; 
+  max-width: 1100px;
+  height: 90vh; 
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 4px 15px rgba(0,0,0,0.15);
+  display: flex; 
+  overflow: hidden;
+}
+
+/* Сайдбар */
+.sidebar {
+  width: 260px;
+  background-color: #1e293b;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #334155;
+}
+
+.sidebar-header {
+  padding: 15px;
+  background-color: #0f172a;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.9rem;
+}
+
+.logout-btn { 
+  background: rgba(255,255,255,0.15); 
+  border: 1px solid rgba(255,255,255,0.3); 
+  color: #fff; 
+  padding: 5px 10px; 
+  border-radius: 4px; 
+  cursor: pointer; 
+  font-size: 0.8rem; 
+  transition: background 0.2s;
+}
+
+.logout-btn:hover { 
+  background: #dc3545; 
+  border-color: #dc3545;
+}
+
+.users-section {
+  padding: 12px;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.users-section h4 {
+  margin: 12px 6px 6px;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #94a3b8;
+}
+
+.user-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.15s;
+}
+
+.user-item:hover {
+  background-color: #334155;
+}
+
+.user-item.active {
+  background-color: #007bff;
+  color: #fff;
+}
+
+/* Точка онлайну */
+.status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background-color: #6c757d;
+  flex-shrink: 0;
+}
+
+.status-dot.online {
+  background-color: #28a745;
+  box-shadow: 0 0 6px #28a745;
+}
+
+/* Вікно повідомлень */
+.chat-window {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background-color: #f8fafc;
+}
+
+.chat-header { 
+  background: #007bff; 
+  color: #fff; 
+  padding: 15px 20px; 
+  font-size: 1rem; 
+  font-weight: bold; 
+}
+
+.chat-messages { 
+  flex: 1; 
+  padding: 15px 20px; 
+  overflow-y: auto; 
+  display: flex; 
+  flex-direction: column; 
+  gap: 10px; 
+}
+
+.message { 
+  padding: 10px 14px; 
+  border-radius: 8px; 
+  max-width: 70%; 
+  word-wrap: break-word; 
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
+
+.message.sent {
+  align-self: flex-end;
+  background-color: #007bff;
+  color: #fff;
+  border-bottom-right-radius: 2px;
+}
+
+.message.received {
+  align-self: flex-start;
+  background-color: #e9ecef;
+  color: #333;
+  border-bottom-left-radius: 2px;
+}
+
+.message .author { 
+  font-weight: bold; 
+  font-size: 0.8rem; 
+  margin-bottom: 3px; 
+  opacity: 0.8;
+}
+
+/* Форма вводу */
+.chat-form { 
+  display: flex; 
+  padding: 12px 15px; 
+  background: #eee; 
+  border-top: 1px solid #ddd; 
+}
+
+.chat-form input[type="text"] { 
+  flex: 1; 
+  padding: 10px 14px; 
+  border: 1px solid #ccc; 
+  border-radius: 20px; 
+  outline: none; 
+  font-size: 0.95rem;
+}
+
+.chat-form input[type="text"]:focus {
+  border-color: #007bff;
+}
+
+.chat-form button { 
+  background: #007bff; 
+  color: white; 
+  border: none; 
+  padding: 10px 20px; 
+  margin-left: 8px; 
+  border-radius: 20px; 
+  cursor: pointer; 
+  font-weight: bold;
+  transition: background 0.2s;
+}
+
+.chat-form button:hover { 
+  background: #0056b3; 
+}

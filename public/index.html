@@ -1,14 +1,10 @@
 <!DOCTYPE html>
 <html lang="uk">
 <head>
-  
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Real-Time Chat</title>
-  
-  <!-- Підключення зовнішнього файлу стилів -->
   <link rel="stylesheet" href="style.css">
-
 </head>
 <body>
 
@@ -34,17 +30,42 @@
     </div>
   </div>
 
-  <!-- 2. Блок Чату (прихований за замовчуванням) -->
-  <div class="chat-container hidden" id="chatContainer">
-    <div class="chat-header">
-      <span>Вітаємо, <span id="userDisplay"></span>!</span>
-      <button class="logout-btn" id="logoutBtn">Вийти</button>
-    </div>
-    <div class="chat-messages" id="messages"></div>
-    <form class="chat-form" id="chatForm">
-      <input type="text" id="messageInput" placeholder="Введіть повідомлення..." required autocomplete="off" />
-      <button type="submit">Надіслати</button>
-    </form>
+  <!-- 2. Блок Чату з сайдбаром (прихований за замовчуванням) -->
+  <div class="chat-app hidden" id="chatContainer">
+    <!-- Сайдбар -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <span>Вітаємо, <strong id="userDisplay"></strong>!</span>
+        <button class="logout-btn" id="logoutBtn">Вийти</button>
+      </div>
+
+      <div class="users-section">
+        <h4>Чати</h4>
+        <div class="user-item active" id="generalChatBtn" data-chat="general">
+          <span class="status-dot online"></span>
+          <span>📢 Загальний чат</span>
+        </div>
+
+        <h4>Користувачі</h4>
+        <div id="usersList" class="users-list">
+          <!-- Динамічний список користувачів -->
+        </div>
+      </div>
+    </aside>
+
+    <!-- Основне вікно чату -->
+    <main class="chat-window">
+      <header class="chat-header">
+        <h3 id="chatTitle">📢 Загальний чат</h3>
+      </header>
+
+      <div class="chat-messages" id="messages"></div>
+
+      <form class="chat-form" id="chatForm">
+        <input type="text" id="messageInput" placeholder="Введіть повідомлення..." required autocomplete="off" />
+        <button type="submit">Надіслати</button>
+      </form>
+    </main>
   </div>
 
 </div>
@@ -52,6 +73,9 @@
 <script src="/socket.io/socket.io.js"></script>
 <script>
   let socket;
+  let currentUser = null;
+  let activeChat = 'general';
+  let onlineUsersSet = new Set();
 
   // Елементи DOM
   const authBox = document.getElementById('authBox');
@@ -68,6 +92,9 @@
   const chatForm = document.getElementById('chatForm');
   const messageInput = document.getElementById('messageInput');
   const messages = document.getElementById('messages');
+  const chatTitle = document.getElementById('chatTitle');
+  const usersList = document.getElementById('usersList');
+  const generalChatBtn = document.getElementById('generalChatBtn');
 
   // Автоматична перевірка сесії при відкритті сторінки
   window.addEventListener('DOMContentLoaded', async () => {
@@ -131,46 +158,152 @@
     window.location.reload();
   });
 
-  // Ініціалізація Socket.IO після авторизації
-  function startChatSession(username) {
+  // Ініціалізація Socket.IO та робота з чатом
+  async function startChatSession(username) {
+    currentUser = username;
     authBox.classList.add('hidden');
     chatContainer.classList.remove('hidden');
     userDisplay.innerText = username;
 
-    // З'єднання встановлюється з автоматичною передачею авторизаційного cookie
     socket = io();
 
-    // 1. Прийом історії
+    // 1. Події Socket.IO
     socket.on('chatHistory', (history) => {
-      messages.innerHTML = '';
-      history.forEach((data) => appendMessage(data));
-      messages.scrollTop = messages.scrollHeight;
+      if (activeChat === 'general') {
+        messages.innerHTML = '';
+        history.forEach((data) => appendMessage(data.user, data.text, data.user === currentUser));
+        scrollToBottom();
+      }
     });
 
-    // 2. Отримання нового повідомлення
     socket.on('chatMessage', (data) => {
-      appendMessage(data);
-      messages.scrollTop = messages.scrollHeight;
+      if (activeChat === 'general') {
+        appendMessage(data.user, data.text, data.user === currentUser);
+        scrollToBottom();
+      }
     });
 
-    // 3. Відправка повідомлення
-    chatForm.addEventListener('submit', (e) => {
+    socket.on('privateMessage', (msg) => {
+      const isRelevant = 
+        (activeChat === msg.sender && msg.recipient === currentUser) || 
+        (activeChat === msg.recipient && msg.sender === currentUser);
+
+      if (isRelevant) {
+        appendMessage(msg.sender, msg.text, msg.sender === currentUser);
+        scrollToBottom();
+      }
+    });
+
+    socket.on('onlineUsers', (onlineArray) => {
+      onlineUsersSet = new Set(onlineArray);
+      updateOnlineStatusInList();
+    });
+
+    // 2. Завантаження користувачів
+    await loadUsers();
+
+    // 3. Обробник відправки форми
+    chatForm.onsubmit = (e) => {
       e.preventDefault();
       const text = messageInput.value.trim();
+      if (!text) return;
 
-      if (text) {
+      if (activeChat === 'general') {
         socket.emit('chatMessage', { text });
-        messageInput.value = '';
-        messageInput.focus();
+      } else {
+        socket.emit('privateMessage', { recipient: activeChat, text });
+      }
+
+      messageInput.value = '';
+      messageInput.focus();
+    };
+
+    generalChatBtn.onclick = () => switchChat('general');
+  }
+
+  // Перемикання чатів
+  function switchChat(target) {
+    activeChat = target;
+    messages.innerHTML = '';
+
+    document.querySelectorAll('.user-item').forEach(el => el.classList.remove('active'));
+
+    if (target === 'general') {
+      generalChatBtn.classList.add('active');
+      chatTitle.innerText = '📢 Загальний чат';
+    } else {
+      const activeUserNode = document.querySelector(`.user-item[data-username="${target}"]`);
+      if (activeUserNode) activeUserNode.classList.add('active');
+      chatTitle.innerText = `💬 Приватний чат з ${target}`;
+      loadPrivateHistory(target);
+    }
+  }
+
+  // Завантаження списку користувачів
+  async function loadUsers() {
+    try {
+      const res = await fetch('/api/users');
+      const users = await res.json();
+
+      usersList.innerHTML = '';
+      users.forEach(user => {
+        const isOnline = onlineUsersSet.has(user.username) || user.isOnline;
+        const userDiv = document.createElement('div');
+        userDiv.className = 'user-item';
+        userDiv.dataset.username = user.username;
+        userDiv.innerHTML = `
+          <span class="status-dot ${isOnline ? 'online' : ''}"></span>
+          <span>${user.username}</span>
+        `;
+        userDiv.onclick = () => switchChat(user.username);
+        usersList.appendChild(userDiv);
+      });
+    } catch (err) {
+      console.error('Помилка завантаження користувачів:', err);
+    }
+  }
+
+  // Завантаження приватних повідомлень
+  async function loadPrivateHistory(targetUser) {
+    try {
+      const res = await fetch(`/api/messages/${targetUser}`);
+      const history = await res.json();
+      messages.innerHTML = '';
+      history.forEach(msg => appendMessage(msg.sender, msg.text, msg.sender === currentUser));
+      scrollToBottom();
+    } catch (err) {
+      console.error('Помилка завантаження історії:', err);
+    }
+  }
+
+  // Оновлення індикаторів онлайну в списку
+  function updateOnlineStatusInList() {
+    document.querySelectorAll('#usersList .user-item').forEach(userNode => {
+      const name = userNode.dataset.username;
+      const dot = userNode.querySelector('.status-dot');
+      if (dot) {
+        if (onlineUsersSet.has(name)) {
+          dot.classList.add('online');
+        } else {
+          dot.classList.remove('online');
+        }
       }
     });
   }
 
-  function appendMessage(data) {
+  // Додавання елемента повідомлення
+  function appendMessage(author, text, isSelf) {
     const msgDiv = document.createElement('div');
-    msgDiv.classList.add('message');
-    msgDiv.innerHTML = `<span>${data.user}</span>${data.text}`;
+    msgDiv.classList.add('message', isSelf ? 'sent' : 'received');
+    msgDiv.innerHTML = `
+      ${!isSelf ? `<span class="author">${author}</span>` : ''}
+      <div class="text">${text}</div>
+    `;
     messages.appendChild(msgDiv);
+  }
+
+  function scrollToBottom() {
+    messages.scrollTop = messages.scrollHeight;
   }
 </script>
 
