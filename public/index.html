@@ -1,73 +1,171 @@
 <!DOCTYPE html>
 <html lang="uk">
 <head>
+  
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Real-Time Chat</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: Arial, sans-serif; background-color: #f4f7f6; display: flex; justify-content: center; align-items: center; height: 100vh; }
-    .chat-container { width: 400px; height: 550px; background: #fff; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); display: flex; flex-direction: column; overflow: hidden; }
-    .chat-header { background: #007bff; color: #fff; padding: 15px; text-align: center; font-size: 1.2rem; font-weight: bold; }
-    .chat-messages { flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
-    .message { background: #e9ecef; padding: 8px 12px; border-radius: 8px; max-width: 80%; word-wrap: break-word; }
-    .message span { font-weight: bold; color: #007bff; display: block; font-size: 0.85rem; }
-    .chat-form { display: flex; padding: 10px; background: #eee; border-top: 1px solid #ddd; }
-    .chat-form input[type="text"] { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; outline: none; }
-    .chat-form input#username { width: 90px; margin-right: 5px; }
-    .chat-form button { background: #007bff; color: white; border: none; padding: 10px 15px; margin-left: 5px; border-radius: 4px; cursor: pointer; }
-    .chat-form button:hover { background: #0056b3; }
-  </style>
+  
+  <!-- Підключення зовнішнього файлу стилів -->
+  <link rel="stylesheet" href="style.css">
+
 </head>
 <body>
 
-<div class="chat-container">
-  <div class="chat-header">Чат в реальному часі</div>
-  <div class="chat-messages" id="messages"></div>
-  <form class="chat-form" id="chatForm">
-    <input type="text" id="username" placeholder="Нікнейм" required />
-    <input type="text" id="messageInput" placeholder="Введіть повідомлення..." required autocomplete="off" />
-    <button type="submit">Надіслати</button>
-  </form>
+<div class="app-container">
+
+  <!-- 1. Блок Авторизації -->
+  <div class="auth-box" id="authBox">
+    <h2>Вхід у чат</h2>
+    <div class="form-group">
+      <label for="authUsername">Логін</label>
+      <input type="text" id="authUsername" placeholder="Введіть логін" required>
+    </div>
+    <div class="form-group">
+      <label for="authPassword">Пароль</label>
+      <input type="password" id="authPassword" placeholder="Введіть пароль" required>
+    </div>
+    <label class="checkbox-group">
+      <input type="checkbox" id="rememberMe"> Запам'ятати мене
+    </label>
+    <div class="auth-buttons">
+      <button class="btn" id="loginBtn">Увійти</button>
+      <button class="btn btn-secondary" id="registerBtn">Реєстрація</button>
+    </div>
+  </div>
+
+  <!-- 2. Блок Чату (прихований за замовчуванням) -->
+  <div class="chat-container hidden" id="chatContainer">
+    <div class="chat-header">
+      <span>Вітаємо, <span id="userDisplay"></span>!</span>
+      <button class="logout-btn" id="logoutBtn">Вийти</button>
+    </div>
+    <div class="chat-messages" id="messages"></div>
+    <form class="chat-form" id="chatForm">
+      <input type="text" id="messageInput" placeholder="Введіть повідомлення..." required autocomplete="off" />
+      <button type="submit">Надіслати</button>
+    </form>
+  </div>
+
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
-  const socket = io();
+  let socket;
+
+  // Елементи DOM
+  const authBox = document.getElementById('authBox');
+  const chatContainer = document.getElementById('chatContainer');
+  const authUsername = document.getElementById('authUsername');
+  const authPassword = document.getElementById('authPassword');
+  const rememberMe = document.getElementById('rememberMe');
+  const userDisplay = document.getElementById('userDisplay');
+  
+  const loginBtn = document.getElementById('loginBtn');
+  const registerBtn = document.getElementById('registerBtn');
+  const logoutBtn = document.getElementById('logoutBtn');
+  
   const chatForm = document.getElementById('chatForm');
   const messageInput = document.getElementById('messageInput');
-  const usernameInput = document.getElementById('username');
   const messages = document.getElementById('messages');
 
-  // 1. Прийом історії повідомлень із MongoDB під час підключення
-  socket.on('chatHistory', (history) => {
-    messages.innerHTML = ''; // Очищаємо контейнер
-    history.forEach((data) => {
-      appendMessage(data);
-    });
-    messages.scrollTop = messages.scrollHeight;
-  });
+  // Автоматична перевірка сесії при відкритті сторінки
+  window.addEventListener('DOMContentLoaded', async () => {
+    try {
+      const res = await fetch('/api/me');
+      const data = await res.json();
 
-  // 2. Відправка повідомлення на сервер
-  chatForm.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const user = usernameInput.value.trim();
-    const text = messageInput.value.trim();
-
-    if (user && text) {
-      socket.emit('chatMessage', { user, text });
-      messageInput.value = '';
-      messageInput.focus();
+      if (data.authenticated) {
+        startChatSession(data.username);
+      }
+    } catch (err) {
+      console.error('Помилка перевірки сесії:', err);
     }
   });
 
-  // 3. Отримання нового повідомлення від сервера в реальному часі
-  socket.on('chatMessage', (data) => {
-    appendMessage(data);
-    messages.scrollTop = messages.scrollHeight;
+  // Вхід
+  loginBtn.addEventListener('click', async () => {
+    const username = authUsername.value.trim();
+    const password = authPassword.value.trim();
+
+    if (!username || !password) return alert('Заповніть усі поля!');
+
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, rememberMe: rememberMe.checked })
+    });
+
+    const data = await res.json();
+    if (data.success) {
+      startChatSession(data.username);
+    } else {
+      alert(data.error);
+    }
   });
 
-  // Допоміжна функція для створення HTML-елемента повідомлення
+  // Реєстрація
+  registerBtn.addEventListener('click', async () => {
+    const username = authUsername.value.trim();
+    const password = authPassword.value.trim();
+
+    if (!username || !password) return alert('Заповніть усі поля!');
+
+    const res = await fetch('/api/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+
+    const data = await res.json();
+    if (data.success) {
+      alert('Реєстрація успішна! Тепер увійдіть.');
+    } else {
+      alert(data.error);
+    }
+  });
+
+  // Вихід з акаунту
+  logoutBtn.addEventListener('click', async () => {
+    await fetch('/api/logout', { method: 'POST' });
+    window.location.reload();
+  });
+
+  // Ініціалізація Socket.IO після авторизації
+  function startChatSession(username) {
+    authBox.classList.add('hidden');
+    chatContainer.classList.remove('hidden');
+    userDisplay.innerText = username;
+
+    // З'єднання встановлюється з автоматичною передачею авторизаційного cookie
+    socket = io();
+
+    // 1. Прийом історії
+    socket.on('chatHistory', (history) => {
+      messages.innerHTML = '';
+      history.forEach((data) => appendMessage(data));
+      messages.scrollTop = messages.scrollHeight;
+    });
+
+    // 2. Отримання нового повідомлення
+    socket.on('chatMessage', (data) => {
+      appendMessage(data);
+      messages.scrollTop = messages.scrollHeight;
+    });
+
+    // 3. Відправка повідомлення
+    chatForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const text = messageInput.value.trim();
+
+      if (text) {
+        socket.emit('chatMessage', { text });
+        messageInput.value = '';
+        messageInput.focus();
+      }
+    });
+  }
+
   function appendMessage(data) {
     const msgDiv = document.createElement('div');
     msgDiv.classList.add('message');

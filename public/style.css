@@ -1,0 +1,33 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: Arial, sans-serif; background-color: #f4f7f6; display: flex; justify-content: center; align-items: center; height: 100vh; }
+.hidden { display: none !important; }
+
+/* Контейнери */
+.app-container { width: 400px; background: #fff; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); overflow: hidden; }
+
+/* Форма авторизації */
+.auth-box { padding: 25px; display: flex; flex-direction: column; gap: 15px; }
+.auth-box h2 { text-align: center; color: #007bff; margin-bottom: 5px; }
+.form-group { display: flex; flex-direction: column; gap: 5px; }
+.form-group label { font-size: 0.9rem; color: #333; }
+.form-group input[type="text"], 
+.form-group input[type="password"] { padding: 10px; border: 1px solid #ccc; border-radius: 4px; outline: none; }
+.checkbox-group { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; cursor: pointer; }
+.auth-buttons { display: flex; gap: 10px; }
+.btn { flex: 1; padding: 10px; border: none; border-radius: 4px; background: #007bff; color: white; cursor: pointer; font-weight: bold; }
+.btn:hover { background: #0056b3; }
+.btn-secondary { background: #6c757d; }
+.btn-secondary:hover { background: #5a6268; }
+
+/* Чат */
+.chat-container { height: 550px; display: flex; flex-direction: column; }
+.chat-header { background: #007bff; color: #fff; padding: 15px; display: flex; justify-content: space-between; align-items: center; font-size: 1rem; font-weight: bold; }
+.logout-btn { background: rgba(255,255,255,0.2); border: 1px solid #fff; color: #fff; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+.logout-btn:hover { background: rgba(255,255,255,0.4); }
+.chat-messages { flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.message { background: #e9ecef; padding: 8px 12px; border-radius: 8px; max-width: 80%; word-wrap: break-word; }
+.message span { font-weight: bold; color: #007bff; display: block; font-size: 0.85rem; }
+.chat-form { display: flex; padding: 10px; background: #eee; border-top: 1px solid #ddd; }
+.chat-form input[type="text"] { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; outline: none; }
+.chat-form button { background: #007bff; color: white; border: none; padding: 10px 15px; margin-left: 5px; border-radius: 4px; cursor: pointer; }
+.chat-form button:hover { background: #0056b3; }
