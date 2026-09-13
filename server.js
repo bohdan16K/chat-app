@@ -39,7 +39,7 @@ const Message = mongoose.model('Message', messageSchema);
 
 // --- REST API МАРШРУТИ АВТОРИЗАЦІЇ ---
 
-// Реєстрація
+// Реєстрація (оновлено: з автоматичною видачею токена)
 app.post('/api/register', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -56,7 +56,21 @@ app.post('/api/register', async (req, res) => {
     const newUser = new User({ username, password: hashedPassword });
     await newUser.save();
 
-    res.status(201).json({ success: true, message: 'Успішно зареєстровано' });
+    // Створюємо токен і ставимо Cookie одразу після реєстрації
+    const token = jwt.sign(
+      { userId: newUser._id, username: newUser.username }, 
+      JWT_SECRET, 
+      { expiresIn: '1d' }
+    );
+
+    res.cookie('token', token, {
+      httpOnly: true,
+      maxAge: 24 * 60 * 60 * 1000, // 1 день
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax'
+    });
+
+    res.status(201).json({ success: true, username: newUser.username, message: 'Успішно зареєстровано' });
   } catch (err) {
     res.status(500).json({ error: 'Помилка реєстрації' });
   }
