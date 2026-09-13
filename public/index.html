@@ -72,10 +72,11 @@
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
-  let socket;
+let socket;
   let currentUser = null;
   let activeChat = 'general';
   let onlineUsersSet = new Set();
+  let generalHistory = []; // Масив для зберігання повідомлень загального чату
 
   // Елементи DOM
   const authBox = document.getElementById('authBox');
@@ -96,7 +97,7 @@
   const usersList = document.getElementById('usersList');
   const generalChatBtn = document.getElementById('generalChatBtn');
 
-  // Автоматична перевірка сесії при відкритті сторінки
+  // Перевірка сесії при завантаженні
   window.addEventListener('DOMContentLoaded', async () => {
     try {
       const res = await fetch('/api/me');
@@ -152,13 +153,13 @@
     }
   });
 
-  // Вихід з акаунту
+  // Вихід
   logoutBtn.addEventListener('click', async () => {
     await fetch('/api/logout', { method: 'POST' });
     window.location.reload();
   });
 
-  // Ініціалізація Socket.IO та робота з чатом
+  // Ініціалізація Socket.IO
   async function startChatSession(username) {
     currentUser = username;
     authBox.classList.add('hidden');
@@ -167,22 +168,24 @@
 
     socket = io();
 
-    // 1. Події Socket.IO
+    // 1. Початкова історія загального чату
     socket.on('chatHistory', (history) => {
+      generalHistory = history;
       if (activeChat === 'general') {
-        messages.innerHTML = '';
-        history.forEach((data) => appendMessage(data.user, data.text, data.user === currentUser));
-        scrollToBottom();
+        renderGeneralHistory();
       }
     });
 
+    // 2. Нові повідомлення загального чату
     socket.on('chatMessage', (data) => {
+      generalHistory.push(data);
       if (activeChat === 'general') {
         appendMessage(data.user, data.text, data.user === currentUser);
         scrollToBottom();
       }
     });
 
+    // 3. Приватні повідомлення
     socket.on('privateMessage', (msg) => {
       const isRelevant = 
         (activeChat === msg.sender && msg.recipient === currentUser) || 
@@ -194,15 +197,15 @@
       }
     });
 
+    // 4. Оновлення списку онлайну
     socket.on('onlineUsers', (onlineArray) => {
       onlineUsersSet = new Set(onlineArray);
       updateOnlineStatusInList();
     });
 
-    // 2. Завантаження користувачів
     await loadUsers();
 
-    // 3. Обробник відправки форми
+    // Відправка повідомлень
     chatForm.onsubmit = (e) => {
       e.preventDefault();
       const text = messageInput.value.trim();
@@ -221,6 +224,15 @@
     generalChatBtn.onclick = () => switchChat('general');
   }
 
+  // Відмалювання збереженої історії загального чату
+  function renderGeneralHistory() {
+    messages.innerHTML = '';
+    generalHistory.forEach((data) => {
+      appendMessage(data.user, data.text, data.user === currentUser);
+    });
+    scrollToBottom();
+  }
+
   // Перемикання чатів
   function switchChat(target) {
     activeChat = target;
@@ -231,6 +243,7 @@
     if (target === 'general') {
       generalChatBtn.classList.add('active');
       chatTitle.innerText = '📢 Загальний чат';
+      renderGeneralHistory();
     } else {
       const activeUserNode = document.querySelector(`.user-item[data-username="${target}"]`);
       if (activeUserNode) activeUserNode.classList.add('active');
@@ -276,7 +289,7 @@
     }
   }
 
-  // Оновлення індикаторів онлайну в списку
+  // Оновлення статусу онлайну
   function updateOnlineStatusInList() {
     document.querySelectorAll('#usersList .user-item').forEach(userNode => {
       const name = userNode.dataset.username;
@@ -291,7 +304,7 @@
     });
   }
 
-  // Додавання елемента повідомлення
+  // Додавання повідомлення у DOM
   function appendMessage(author, text, isSelf) {
     const msgDiv = document.createElement('div');
     msgDiv.classList.add('message', isSelf ? 'sent' : 'received');

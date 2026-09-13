@@ -47,7 +47,7 @@ const privateMessageSchema = new mongoose.Schema({
 const PrivateMessage = mongoose.model('PrivateMessage', privateMessageSchema);
 
 // Глобальне сховище для списку користувачів онлайн
-const onlineUsers = new Set();
+const onlineUsers = new Map();
 
 // --- REST API МАРШРУТИ АВТОРИЗАЦІЇ ---
 
@@ -214,14 +214,14 @@ io.use((socket, next) => {
 });
 
 io.on('connection', async (socket) => {
-  // 1. Оголошуємо зручну змінну username для всього блоку connection
+  // 1. Змінна username для всього блоку connection
   const username = socket.user.username;
   console.log(`Користувач ${username} підключився`);
 
   // 2. Приєднуємо користувача до власної кімнати (для приватних повідомлень)
   socket.join(username);
 
-  // 3. Додаємо юзера в онлайн і сповіщаємо ВСІХ
+  // 3. Додаємо юзера в онлайн і сповіщаємо всіх
   onlineUsers.add(username);
   io.emit('onlineUsers', Array.from(onlineUsers));
 
@@ -236,6 +236,8 @@ io.on('connection', async (socket) => {
   // 5. Загальне повідомлення (General Chat)
   socket.on('chatMessage', async (data) => {
     try {
+      if (!data.text?.trim()) return;
+
       const newMessage = new Message({
         user: username,
         text: data.text
@@ -252,6 +254,7 @@ io.on('connection', async (socket) => {
   socket.on('privateMessage', async (data) => {
     try {
       const { recipient, text } = data;
+      if (!recipient || !text?.trim()) return;
 
       const newMsg = new PrivateMessage({
         sender: username,
@@ -260,21 +263,18 @@ io.on('connection', async (socket) => {
       });
       await newMsg.save();
 
-      // Відправляємо отримувачу в його кімнату
-      io.to(recipient).emit('privateMessage', {
+      const messageData = {
         sender: username,
         recipient: recipient,
         text: text,
         createdAt: newMsg.createdAt
-      });
+      };
 
-      // Відправляємо відправнику (собі)
-      socket.emit('privateMessage', {
-        sender: username,
-        recipient: recipient,
-        text: text,
-        createdAt: newMsg.createdAt
-      });
+      // Відправляємо отримувачу в його кімнату
+      io.to(recipient).emit('privateMessage', messageData);
+
+      // Відправляємо відправнику
+      socket.emit('privateMessage', messageData);
     } catch (err) {
       console.error('Помилка приватного повідомлення:', err);
     }
@@ -284,7 +284,6 @@ io.on('connection', async (socket) => {
   socket.on('disconnect', () => {
     console.log(`Користувач ${username} відключився`);
 
-    // Прибираємо з Set та оновлюємо список онлайн у всіх клієнтів
     onlineUsers.delete(username);
     io.emit('onlineUsers', Array.from(onlineUsers));
   });
