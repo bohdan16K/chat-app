@@ -37,6 +37,18 @@ const messageSchema = new mongoose.Schema({
 const Message = mongoose.model('Message', messageSchema);
 
 
+// 3. Приватні повідомлення
+const privateMessageSchema = new mongoose.Schema({
+  sender: { type: String, required: true },
+  recipient: { type: String, required: true },
+  text: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+const PrivateMessage = mongoose.model('PrivateMessage', privateMessageSchema);
+
+// Глобальне сховище для списку користувачів онлайн
+const onlineUsers = new Set();
+
 // --- REST API МАРШРУТИ АВТОРИЗАЦІЇ ---
 
 // Реєстрація (оновлено: з автоматичною видачею токена)
@@ -129,8 +141,57 @@ app.post('/api/logout', (req, res) => {
   res.json({ success: true });
 });
 
+// Перевірка логіну
 
+const requireAuth = (req, res, next) => {
+  const token = req.cookies.token;
+  if (!token) return res.status(401).json({ error: 'Не авторизовано' });
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch (err) {
+    res.status(401).json({ error: 'Не авторизовано' });
+  }
+};
+
+// Список користувачів
+app.get('/api/users', requireAuth, async (req, res) => {
+  try {
+    const users = await User.find({ username: { $ne: req.user.username } }, 'username');
+    const usersWithStatus = users.map(user => ({
+      username: user.username,
+      isOnline: onlineUsers.has(user.username)
+    }));
+
+    res.json(usersWithStatus);
+  } catch (err) {
+    res.status(500).json({ error: 'Помилка завантаження користувачів' });
+  }
+});
+
+// Історія приватного чату
+app.get('/api/messages/:targetUser', requireAuth, async (req, res) => {
+  try {
+    const currentUser = req.user.username;
+    const targetUser = req.params.targetUser;
+
+    const history = await PrivateMessage.find({
+      $or: [
+        { sender: currentUser, recipient: targetUser },
+        { sender: targetUser, recipient: currentUser }
+      ]
+    }).sort({ createdAt: 1 });
+
+    res.json(history);
+  } catch (err) {
+    res.status(500).json({ error: 'Помилка завантаження історії' });
+  }
+});
+
+
+// ==========================================
 // --- SOCKET.IO МІДЛВЕР ТА ОБРОБКА З'ЄДНАНЬ ---
+// ==========================================
 
 // Авторизація Socket.IO через HTTP-only Cookie
 io.use((socket, next) => {
@@ -153,9 +214,18 @@ io.use((socket, next) => {
 });
 
 io.on('connection', async (socket) => {
-  console.log(`Користувач ${socket.user.username} підключився`);
+  // 1. Оголошуємо зручну змінну username для всього блоку connection
+  const username = socket.user.username;
+  console.log(`Користувач ${username} підключився`);
 
-  // Відправка історії
+  // 2. Приєднуємо користувача до власної кімнати (для приватних повідомлень)
+  socket.join(username);
+
+  // 3. Додаємо юзера в онлайн і сповіщаємо ВСІХ
+  onlineUsers.add(username);
+  io.emit('onlineUsers', Array.from(onlineUsers));
+
+  // 4. Відправка історії загального чату під час підключення
   try {
     const history = await Message.find().sort({ createdAt: 1 }).limit(50);
     socket.emit('chatHistory', history);
@@ -163,26 +233,62 @@ io.on('connection', async (socket) => {
     console.error('Помилка завантаження історії:', err);
   }
 
-  // Нове повідомлення (ім'я береться напряму з токена сокета)
+  // 5. Загальне повідомлення (General Chat)
   socket.on('chatMessage', async (data) => {
     try {
       const newMessage = new Message({
-        user: socket.user.username,
+        user: username,
         text: data.text
       });
       await newMessage.save();
 
-      io.emit('chatMessage', { user: socket.user.username, text: data.text });
+      io.emit('chatMessage', { user: username, text: data.text });
     } catch (err) {
       console.error('Помилка збереження повідомлення:', err);
     }
   });
 
+  // 6. Приватне повідомлення (Private Chat 1-on-1)
+  socket.on('privateMessage', async (data) => {
+    try {
+      const { recipient, text } = data;
+
+      const newMsg = new PrivateMessage({
+        sender: username,
+        recipient: recipient,
+        text: text
+      });
+      await newMsg.save();
+
+      // Відправляємо отримувачу в його кімнату
+      io.to(recipient).emit('privateMessage', {
+        sender: username,
+        recipient: recipient,
+        text: text,
+        createdAt: newMsg.createdAt
+      });
+
+      // Відправляємо відправнику (собі)
+      socket.emit('privateMessage', {
+        sender: username,
+        recipient: recipient,
+        text: text,
+        createdAt: newMsg.createdAt
+      });
+    } catch (err) {
+      console.error('Помилка приватного повідомлення:', err);
+    }
+  });
+
+  // 7. Обробка відключення користувача
   socket.on('disconnect', () => {
-    console.log(`Користувач ${socket.user.username} відключився`);
+    console.log(`Користувач ${username} відключився`);
+
+    // Прибираємо з Set та оновлюємо список онлайн у всіх клієнтів
+    onlineUsers.delete(username);
+    io.emit('onlineUsers', Array.from(onlineUsers));
   });
 });
-
 
 // --- ЗАПУСК СЕРВЕРА ---
 
@@ -203,6 +309,7 @@ async function start() {
     });
   } catch (err) {
     console.error('Помилка запуску сервера:', err);
+    process.exit(1);
   }
 }
 
