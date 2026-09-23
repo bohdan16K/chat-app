@@ -307,6 +307,7 @@ io.on('connection', async (socket) => {
       io.to(data.recipient).emit('stopTyping', { sender: username, recipient: data.recipient });
     }
   });
+});
 
 // --- ЗАПУСК СЕРВЕРА ---
 
