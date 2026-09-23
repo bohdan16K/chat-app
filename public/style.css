@@ -566,7 +566,7 @@ body {
 
 .message.received {
   align-self: flex-start;
-  background-color: #f3f4f6;
+  background-color: #88a9eb;
   color: #1f2937;
   border-bottom-left-radius: 2px;
 }
@@ -590,8 +590,8 @@ body {
   display: flex;
   gap: 8px;
   padding: 1rem;
-  border-top: 1px solid #e5e7eb;
-  background: #ffffff;
+  border-top: 1px solid #29a422;
+  background: #29a422;
 }
 
 .chat-form button {
