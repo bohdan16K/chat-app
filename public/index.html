@@ -1,3 +1,76 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Real-Time Chat</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="app-container">
+
+  <!-- 1. Блок Авторизації -->
+  <div class="auth-box" id="authBox">
+    <h2>Вхід у чат</h2>
+    <div class="form-group">
+      <label for="authUsername">Логін</label>
+      <input type="text" id="authUsername" placeholder="Введіть логін" required>
+    </div>
+    <div class="form-group">
+      <label for="authPassword">Пароль</label>
+      <input type="password" id="authPassword" placeholder="Введіть пароль" required>
+    </div>
+    <label class="checkbox-group">
+      <input type="checkbox" id="rememberMe"> Запам'ятати мене
+    </label>
+    <div class="auth-buttons">
+      <button class="btn" id="loginBtn">Увійти</button>
+      <button class="btn btn-secondary" id="registerBtn">Реєстрація</button>
+    </div>
+  </div>
+
+  <!-- 2. Блок Чату з сайдбаром -->
+  <div class="chat-app hidden" id="chatContainer">
+    <!-- Сайдбар -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <span>Вітаємо, <strong id="userDisplay"></strong>!</span>
+        <button class="logout-btn" id="logoutBtn">Вийти</button>
+      </div>
+
+      <div class="users-section">
+        <h4>Чати</h4>
+        <div class="user-item active" id="generalChatBtn" data-chat="general">
+          <span class="status-dot online"></span>
+          <span>📢 Загальний чат</span>
+          <span class="unread-badge hidden" id="badge-general">0</span>
+        </div>
+
+        <h4>Користувачі</h4>
+        <div id="usersList" class="users-list">
+          <!-- Динамічний список користувачів -->
+        </div>
+      </div>
+    </aside>
+
+    <!-- Основне вікно чату -->
+    <main class="chat-window">
+      <header class="chat-header">
+        <h3 id="chatTitle">📢 Загальний чат</h3>
+      </header>
+
+      <div class="chat-messages" id="messages"></div>
+      <div id="typingIndicator" class="typing-indicator hidden"></div>
+      <form class="chat-form" id="chatForm">
+        <input type="text" id="messageInput" placeholder="Введіть повідомлення..." required autocomplete="off" />
+        <button type="submit">Надіслати</button>
+      </form>
+    </main>
+  </div>
+
+</div>
+
 <script src="/socket.io/socket.io.js"></script>
 <script>
   let socket;
@@ -140,7 +213,7 @@
       updateOnlineStatusInList();
     });
 
-    // 5. Отримання подій друкування
+    // 5. Події друкування
     socket.on('typing', (data) => {
       if (data.recipient === activeChat || (activeChat === data.sender && data.recipient === currentUser)) {
         typingUsers.add(data.sender);
@@ -167,14 +240,20 @@
         socket.emit('privateMessage', { recipient: activeChat, text });
       }
 
-      // Зупинка індикації друку при відправці
-      socket.emit('stopTyping', { recipient: activeChat });
-
       messageInput.value = '';
       messageInput.focus();
     };
 
     generalChatBtn.onclick = () => switchChat('general');
+  }
+
+  // Відмалювання збереженої історії загального чату
+  function renderGeneralHistory() {
+    messages.innerHTML = '';
+    generalHistory.forEach((data) => {
+      appendMessage(data.user, data.text, data.user === currentUser);
+    });
+    scrollToBottom();
   }
 
   // Перемикання чатів
@@ -195,23 +274,14 @@
       loadPrivateHistory(target);
     }
 
-    // Скидання лічильника непрочитаних
+    // Скидаємо лічильник непрочитаних
     unreadCounts[target] = 0;
     const badge = document.getElementById(`badge-${target}`);
     if (badge) badge.classList.add('hidden');
 
-    // Очищення індикаторів друкування
+    // Очищаємо індикатори друкування при зміні чату
     typingUsers.clear();
     updateTypingDisplay();
-  }
-
-  // Відмалювання збереженої історії загального чату
-  function renderGeneralHistory() {
-    messages.innerHTML = '';
-    generalHistory.forEach((data) => {
-      appendMessage(data.user, data.text, data.user === currentUser);
-    });
-    scrollToBottom();
   }
 
   // Завантаження списку користувачів
@@ -221,27 +291,26 @@
       const users = await res.json();
 
       usersList.innerHTML = '';
-      users.forEach(user => {
-        // Не виводимо себе в списку користувачів
-        if (user.username === currentUser) return;
+      users
+        .filter(user => user.username !== currentUser) // Виключаємо самого себе
+        .forEach(user => {
+          const isOnline = onlineUsersSet.has(user.username) || user.isOnline;
+          const userDiv = document.createElement('div');
+          userDiv.className = 'user-item';
+          userDiv.dataset.username = user.username;
 
-        const isOnline = onlineUsersSet.has(user.username) || user.isOnline;
-        const userDiv = document.createElement('div');
-        userDiv.className = 'user-item';
-        userDiv.dataset.username = user.username;
+          const currentUnread = unreadCounts[user.username] || 0;
+          const badgeClass = currentUnread > 0 ? 'unread-badge' : 'unread-badge hidden';
 
-        const currentUnread = unreadCounts[user.username] || 0;
-        const badgeClass = currentUnread > 0 ? 'unread-badge' : 'unread-badge hidden';
-
-        userDiv.innerHTML = `
-          <span class="status-dot ${isOnline ? 'online' : ''}"></span>
-          <span>${user.username}</span>
-          <span class="${badgeClass}" id="badge-${user.username}">${currentUnread}</span>
-        `;
-        
-        userDiv.onclick = () => switchChat(user.username);
-        usersList.appendChild(userDiv);
-      });
+          userDiv.innerHTML = `
+            <span class="status-dot ${isOnline ? 'online' : ''}"></span>
+            <span>${user.username}</span>
+            <span class="${badgeClass}" id="badge-${user.username}">${currentUnread}</span>
+          `;
+          
+          userDiv.onclick = () => switchChat(user.username);
+          usersList.appendChild(userDiv);
+        });
     } catch (err) {
       console.error('Помилка завантаження користувачів:', err);
     }
@@ -311,7 +380,7 @@
     }
   }
 
-  // Функція збільшення лічильника
+  // Збільшення лічильника непрочитаних
   function incrementUnread(chatId) {
     unreadCounts[chatId] = (unreadCounts[chatId] || 0) + 1;
     const badge = document.getElementById(`badge-${chatId}`);
@@ -321,3 +390,6 @@
     }
   }
 </script>
+
+</body>
+</html>
