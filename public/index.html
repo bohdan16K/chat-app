@@ -1,87 +1,14 @@
-<!DOCTYPE html>
-<html lang="uk">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Real-Time Chat</title>
-  <link rel="stylesheet" href="style.css">
-</head>
-<body>
-
-<div class="app-container">
-
-  <!-- 1. Блок Авторизації -->
-  <div class="auth-box" id="authBox">
-    <h2>Вхід у чат</h2>
-    <div class="form-group">
-      <label for="authUsername">Логін</label>
-      <input type="text" id="authUsername" placeholder="Введіть логін" required>
-    </div>
-    <div class="form-group">
-      <label for="authPassword">Пароль</label>
-      <input type="password" id="authPassword" placeholder="Введіть пароль" required>
-    </div>
-    <label class="checkbox-group">
-      <input type="checkbox" id="rememberMe"> Запам'ятати мене
-    </label>
-    <div class="auth-buttons">
-      <button class="btn" id="loginBtn">Увійти</button>
-      <button class="btn btn-secondary" id="registerBtn">Реєстрація</button>
-    </div>
-  </div>
-
-  <!-- 2. Блок Чату з сайдбаром (прихований за замовчуванням) -->
-  <div class="chat-app hidden" id="chatContainer">
-    <!-- Сайдбар -->
-    <aside class="sidebar">
-      <div class="sidebar-header">
-        <span>Вітаємо, <strong id="userDisplay"></strong>!</span>
-        <button class="logout-btn" id="logoutBtn">Вийти</button>
-      </div>
-
-      <div class="users-section">
-        <h4>Чати</h4>
-        <div class="user-item active" id="generalChatBtn" data-chat="general">
-          <span class="status-dot online"></span>
-          <span>📢 Загальний чат</span>
-          <span class="unread-badge hidden" id="badge-general">0</span>
-        </div>
-
-        <h4>Користувачі</h4>
-        <div id="usersList" class="users-list">
-          <!-- Динамічний список користувачів -->
-        </div>
-      </div>
-    </aside>
-
-    <!-- Основне вікно чату -->
-    <main class="chat-window">
-      <header class="chat-header">
-        <h3 id="chatTitle">📢 Загальний чат</h3>
-      </header>
-
-      <div class="chat-messages" id="messages"></div>
-      <div id="typingIndicator" class="typing-indicator hidden"></div>
-      <form class="chat-form" id="chatForm">
-        <input type="text" id="messageInput" placeholder="Введіть повідомлення..." required autocomplete="off" />
-        <button type="submit">Надіслати</button>
-      </form>
-    </main>
-  </div>
-
-</div>
-
 <script src="/socket.io/socket.io.js"></script>
 <script>
-let socket;
+  let socket;
   let currentUser = null;
   let activeChat = 'general';
   let typingTimer;
-  const TYPING_TIMEOUT = 1500; // Час до зникнення "друкує..."
+  const TYPING_TIMEOUT = 1500;
   let typingUsers = new Set();
-  let unreadCounts = {}; // Сховище для лічильників
+  let unreadCounts = {};
   let onlineUsersSet = new Set();
-  let generalHistory = []; // Масив для зберігання повідомлень загального чату
+  let generalHistory = [];
 
   // Елементи DOM
   const authBox = document.getElementById('authBox');
@@ -101,6 +28,7 @@ let socket;
   const chatTitle = document.getElementById('chatTitle');
   const usersList = document.getElementById('usersList');
   const generalChatBtn = document.getElementById('generalChatBtn');
+  const typingIndicator = document.getElementById('typingIndicator');
 
   // Перевірка сесії при завантаженні
   window.addEventListener('DOMContentLoaded', async () => {
@@ -182,14 +110,13 @@ let socket;
     });
 
     // 2. Нові повідомлення загального чату
-    // 2. Нові повідомлення загального чату
     socket.on('chatMessage', (data) => {
       generalHistory.push(data);
       if (activeChat === 'general') {
         appendMessage(data.user, data.text, data.user === currentUser);
         scrollToBottom();
       } else {
-        incrementUnread('general'); // Збільшуємо лічильник
+        incrementUnread('general');
       }
     });
 
@@ -203,19 +130,7 @@ let socket;
         appendMessage(msg.sender, msg.text, msg.sender === currentUser);
         scrollToBottom();
       } else {
-        incrementUnread(msg.sender); // Збільшуємо лічильник для відправника
-      }
-    });
-
-    // 3. Приватні повідомлення
-    socket.on('privateMessage', (msg) => {
-      const isRelevant = 
-        (activeChat === msg.sender && msg.recipient === currentUser) || 
-        (activeChat === msg.recipient && msg.sender === currentUser);
-
-      if (isRelevant) {
-        appendMessage(msg.sender, msg.text, msg.sender === currentUser);
-        scrollToBottom();
+        incrementUnread(msg.sender);
       }
     });
 
@@ -223,6 +138,19 @@ let socket;
     socket.on('onlineUsers', (onlineArray) => {
       onlineUsersSet = new Set(onlineArray);
       updateOnlineStatusInList();
+    });
+
+    // 5. Отримання подій друкування
+    socket.on('typing', (data) => {
+      if (data.recipient === activeChat || (activeChat === data.sender && data.recipient === currentUser)) {
+        typingUsers.add(data.sender);
+        updateTypingDisplay();
+      }
+    });
+
+    socket.on('stopTyping', (data) => {
+      typingUsers.delete(data.sender);
+      updateTypingDisplay();
     });
 
     await loadUsers();
@@ -239,20 +167,14 @@ let socket;
         socket.emit('privateMessage', { recipient: activeChat, text });
       }
 
+      // Зупинка індикації друку при відправці
+      socket.emit('stopTyping', { recipient: activeChat });
+
       messageInput.value = '';
       messageInput.focus();
     };
 
     generalChatBtn.onclick = () => switchChat('general');
-  }
-
-  // Відмалювання збереженої історії загального чату
-  function renderGeneralHistory() {
-    messages.innerHTML = '';
-    generalHistory.forEach((data) => {
-      appendMessage(data.user, data.text, data.user === currentUser);
-    });
-    scrollToBottom();
   }
 
   // Перемикання чатів
@@ -272,8 +194,27 @@ let socket;
       chatTitle.innerText = `💬 Приватний чат з ${target}`;
       loadPrivateHistory(target);
     }
+
+    // Скидання лічильника непрочитаних
+    unreadCounts[target] = 0;
+    const badge = document.getElementById(`badge-${target}`);
+    if (badge) badge.classList.add('hidden');
+
+    // Очищення індикаторів друкування
+    typingUsers.clear();
+    updateTypingDisplay();
   }
- // Завантаження списку користувачів
+
+  // Відмалювання збереженої історії загального чату
+  function renderGeneralHistory() {
+    messages.innerHTML = '';
+    generalHistory.forEach((data) => {
+      appendMessage(data.user, data.text, data.user === currentUser);
+    });
+    scrollToBottom();
+  }
+
+  // Завантаження списку користувачів
   async function loadUsers() {
     try {
       const res = await fetch('/api/users');
@@ -281,12 +222,14 @@ let socket;
 
       usersList.innerHTML = '';
       users.forEach(user => {
+        // Не виводимо себе в списку користувачів
+        if (user.username === currentUser) return;
+
         const isOnline = onlineUsersSet.has(user.username) || user.isOnline;
         const userDiv = document.createElement('div');
         userDiv.className = 'user-item';
         userDiv.dataset.username = user.username;
 
-        // Перевіряємо, чи є вже накопичені непрочитані повідомлення для цього юзера
         const currentUnread = unreadCounts[user.username] || 0;
         const badgeClass = currentUnread > 0 ? 'unread-badge' : 'unread-badge hidden';
 
@@ -303,6 +246,7 @@ let socket;
       console.error('Помилка завантаження користувачів:', err);
     }
   }
+
   // Завантаження приватних повідомлень
   async function loadPrivateHistory(targetUser) {
     try {
@@ -345,6 +289,7 @@ let socket;
   function scrollToBottom() {
     messages.scrollTop = messages.scrollHeight;
   }
+
   // Відслідковування вводу тексту
   messageInput.addEventListener('input', () => {
     socket.emit('typing', { recipient: activeChat });
@@ -353,22 +298,6 @@ let socket;
     typingTimer = setTimeout(() => {
       socket.emit('stopTyping', { recipient: activeChat });
     }, TYPING_TIMEOUT);
-  });
-
-  // Отримання подій друкування
-  const typingIndicator = document.getElementById('typingIndicator');
-
-  socket.on('typing', (data) => {
-    // Перевіряємо, чи ми зараз у тому чаті, де друкують
-    if (data.recipient === activeChat || (activeChat === data.sender && data.recipient === currentUser)) {
-      typingUsers.add(data.sender);
-      updateTypingDisplay();
-    }
-  });
-
-  socket.on('stopTyping', (data) => {
-    typingUsers.delete(data.sender);
-    updateTypingDisplay();
   });
 
   function updateTypingDisplay() {
@@ -391,22 +320,4 @@ let socket;
       badge.classList.remove('hidden');
     }
   }
-
-  // Очищення лічильника та індикатора при зміні чату
-  const originalSwitchChat = switchChat; // Зберігаємо стару логіку
-  switchChat = function(target) {
-    originalSwitchChat(target);
-    
-    // Скидаємо лічильник
-    unreadCounts[target] = 0;
-    const badge = document.getElementById(`badge-${target}`);
-    if (badge) badge.classList.add('hidden');
-    
-    // Очищаємо індикатори друкування
-    typingUsers.clear();
-    updateTypingDisplay();
-  };
 </script>
-
-</body>
-</html>

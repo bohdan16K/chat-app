@@ -44,8 +44,9 @@ const privateMessageSchema = new mongoose.Schema({
 });
 const PrivateMessage = mongoose.model('PrivateMessage', privateMessageSchema);
 
-// Глобальне сховище для списку користувачів онлайн
-const onlineUsers = new Set();
+// Сховище користувачів онлайн (Map: username -> Set з ID сокетів)
+// Це вирішує проблему кількох вкладок у одного користувача
+const onlineUsers = new Map();
 
 // --- REST API МАРШРУТИ АВТОРИЗАЦІЇ ---
 
@@ -66,7 +67,6 @@ app.post('/api/register', async (req, res) => {
     const newUser = new User({ username, password: hashedPassword });
     await newUser.save();
 
-    // Створюємо токен і ставимо Cookie одразу після реєстрації
     const token = jwt.sign(
       { userId: newUser._id, username: newUser.username }, 
       JWT_SECRET, 
@@ -75,7 +75,7 @@ app.post('/api/register', async (req, res) => {
 
     res.cookie('token', token, {
       httpOnly: true,
-      maxAge: 24 * 60 * 60 * 1000, // 1 день
+      maxAge: 24 * 60 * 60 * 1000,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax'
     });
@@ -101,7 +101,6 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ error: 'Невірні дані для входу' });
     }
 
-    // Термін дії: 30 днів (з прапором) або 1 день
     const expiresIn = rememberMe ? '30d' : '1d';
     const maxAge = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
 
@@ -120,7 +119,7 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// Автоматична перевірка сесії при перезавантаженні сторінки
+// Перевірка сесії
 app.get('/api/me', (req, res) => {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ authenticated: false });
@@ -139,7 +138,7 @@ app.post('/api/logout', (req, res) => {
   res.json({ success: true });
 });
 
-// Перевірка авторизації для закритих маршрутів
+// Middleware авторизації
 const requireAuth = (req, res, next) => {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ error: 'Не авторизовано' });
@@ -185,25 +184,23 @@ app.get('/api/messages/:targetUser', requireAuth, async (req, res) => {
   }
 });
 
-
 // ==========================================
 // --- SOCKET.IO МІДЛВЕР ТА ОБРОБКА З'ЄДНАНЬ ---
 // ==========================================
 
-// Авторизація Socket.IO через HTTP-only Cookie
 io.use((socket, next) => {
   const reqCookies = socket.handshake.headers.cookie;
   if (!reqCookies) return next(new Error('Auth error'));
 
-  // Дістаємо токен вручну без сторонніх бібліотек
   const tokenCookie = reqCookies.split(';').find(c => c.trim().startsWith('token='));
   if (!tokenCookie) return next(new Error('Auth error'));
 
-  const token = tokenCookie.split('=')[1]; // Отримуємо саме значення токена
+  // Надійне витягування токена без split('=')
+  const token = tokenCookie.trim().substring(6);
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    socket.user = decoded; // Передаємо дані про юзера в сокет
+    socket.user = decoded;
     next();
   } catch (err) {
     next(new Error('Auth error'));
@@ -211,18 +208,21 @@ io.use((socket, next) => {
 });
 
 io.on('connection', async (socket) => {
-  // 1. Змінна username для всього блоку connection
   const username = socket.user.username;
-  console.log(`Користувач ${username} підключився`);
+  console.log(`Користувач ${username} підключився (Socket ID: ${socket.id})`);
 
-  // 2. Приєднуємо користувача до власної кімнати (для приватних повідомлень)
   socket.join(username);
 
-  // 3. Додаємо юзера в онлайн і сповіщаємо всіх
-  onlineUsers.add(username);
-  io.emit('onlineUsers', Array.from(onlineUsers));
+  // Фіксація з'єднання у Map для підтримки кількох вкладок
+  if (!onlineUsers.has(username)) {
+    onlineUsers.set(username, new Set());
+  }
+  onlineUsers.get(username).add(socket.id);
 
-  // 4. Відправка історії загального чату під час підключення
+  // Сповіщаємо про актуальний список користувачів онлайн
+  io.emit('onlineUsers', Array.from(onlineUsers.keys()));
+
+  // Відправка історії загального чату
   try {
     const history = await Message.find().sort({ createdAt: 1 }).limit(50);
     socket.emit('chatHistory', history);
@@ -230,7 +230,7 @@ io.on('connection', async (socket) => {
     console.error('Помилка завантаження історії:', err);
   }
 
-  // 5. Загальне повідомлення (General Chat)
+  // Загальне повідомлення
   socket.on('chatMessage', async (data) => {
     try {
       if (!data.text?.trim()) return;
@@ -247,7 +247,7 @@ io.on('connection', async (socket) => {
     }
   });
 
-  // 6. Приватне повідомлення (Private Chat 1-on-1)
+  // Приватне повідомлення
   socket.on('privateMessage', async (data) => {
     try {
       const { recipient, text } = data;
@@ -267,17 +267,17 @@ io.on('connection', async (socket) => {
         createdAt: newMsg.createdAt
       };
 
-      // Відправляємо отримувачу в його кімнату
+      // Надсилаємо отримувачу в його кімнату
       io.to(recipient).emit('privateMessage', messageData);
 
-      // Відправляємо відправнику
-      socket.emit('privateMessage', messageData);
+      // Надсилаємо відправнику в його кімнату (синхронізує всі його відкриті вкладки)
+      io.to(username).emit('privateMessage', messageData);
     } catch (err) {
       console.error('Помилка приватного повідомлення:', err);
     }
   });
 
-  // 7. Індикатор друкування (тепер ВСЕРЕДИНІ io.on('connection'))
+  // Індикатор друкування
   socket.on('typing', (data) => {
     if (data.recipient === 'general') {
       socket.broadcast.emit('typing', { sender: username, recipient: 'general' });
@@ -294,15 +294,22 @@ io.on('connection', async (socket) => {
     }
   });
 
-  // 8. Обробка відключення користувача
+  // Відключення користувача
   socket.on('disconnect', () => {
-    console.log(`Користувач ${username} відключився`);
+    console.log(`Користувач ${username} відключився (Socket ID: ${socket.id})`);
 
-    onlineUsers.delete(username);
-    io.emit('onlineUsers', Array.from(onlineUsers));
+    const userSockets = onlineUsers.get(username);
+    if (userSockets) {
+      userSockets.delete(socket.id);
+      // Видаляємо юзера з онлайну тільки якщо закрито ВСІ його вкладки
+      if (userSockets.size === 0) {
+        onlineUsers.delete(username);
+      }
+    }
+
+    io.emit('onlineUsers', Array.from(onlineUsers.keys()));
   });
 });
-
 
 // --- ЗАПУСК СЕРВЕРА ---
 
