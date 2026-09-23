@@ -44,6 +44,7 @@
         <div class="user-item active" id="generalChatBtn" data-chat="general">
           <span class="status-dot online"></span>
           <span>📢 Загальний чат</span>
+          <span class="unread-badge hidden" id="badge-general">0</span>
         </div>
 
         <h4>Користувачі</h4>
@@ -60,7 +61,7 @@
       </header>
 
       <div class="chat-messages" id="messages"></div>
-
+      <div id="typingIndicator" class="typing-indicator hidden"></div>
       <form class="chat-form" id="chatForm">
         <input type="text" id="messageInput" placeholder="Введіть повідомлення..." required autocomplete="off" />
         <button type="submit">Надіслати</button>
@@ -75,6 +76,10 @@
 let socket;
   let currentUser = null;
   let activeChat = 'general';
+  let typingTimer;
+  const TYPING_TIMEOUT = 1500; // Час до зникнення "друкує..."
+  let typingUsers = new Set();
+  let unreadCounts = {}; // Сховище для лічильників
   let onlineUsersSet = new Set();
   let generalHistory = []; // Масив для зберігання повідомлень загального чату
 
@@ -177,11 +182,28 @@ let socket;
     });
 
     // 2. Нові повідомлення загального чату
+    // 2. Нові повідомлення загального чату
     socket.on('chatMessage', (data) => {
       generalHistory.push(data);
       if (activeChat === 'general') {
         appendMessage(data.user, data.text, data.user === currentUser);
         scrollToBottom();
+      } else {
+        incrementUnread('general'); // Збільшуємо лічильник
+      }
+    });
+
+    // 3. Приватні повідомлення
+    socket.on('privateMessage', (msg) => {
+      const isRelevant = 
+        (activeChat === msg.sender && msg.recipient === currentUser) || 
+        (activeChat === msg.recipient && msg.sender === currentUser);
+
+      if (isRelevant) {
+        appendMessage(msg.sender, msg.text, msg.sender === currentUser);
+        scrollToBottom();
+      } else {
+        incrementUnread(msg.sender); // Збільшуємо лічильник для відправника
       }
     });
 
@@ -251,8 +273,7 @@ let socket;
       loadPrivateHistory(target);
     }
   }
-
-  // Завантаження списку користувачів
+ // Завантаження списку користувачів
   async function loadUsers() {
     try {
       const res = await fetch('/api/users');
@@ -264,10 +285,17 @@ let socket;
         const userDiv = document.createElement('div');
         userDiv.className = 'user-item';
         userDiv.dataset.username = user.username;
+
+        // Перевіряємо, чи є вже накопичені непрочитані повідомлення для цього юзера
+        const currentUnread = unreadCounts[user.username] || 0;
+        const badgeClass = currentUnread > 0 ? 'unread-badge' : 'unread-badge hidden';
+
         userDiv.innerHTML = `
           <span class="status-dot ${isOnline ? 'online' : ''}"></span>
           <span>${user.username}</span>
+          <span class="${badgeClass}" id="badge-${user.username}">${currentUnread}</span>
         `;
+        
         userDiv.onclick = () => switchChat(user.username);
         usersList.appendChild(userDiv);
       });
@@ -275,7 +303,6 @@ let socket;
       console.error('Помилка завантаження користувачів:', err);
     }
   }
-
   // Завантаження приватних повідомлень
   async function loadPrivateHistory(targetUser) {
     try {
@@ -318,6 +345,67 @@ let socket;
   function scrollToBottom() {
     messages.scrollTop = messages.scrollHeight;
   }
+  // Відслідковування вводу тексту
+  messageInput.addEventListener('input', () => {
+    socket.emit('typing', { recipient: activeChat });
+    
+    clearTimeout(typingTimer);
+    typingTimer = setTimeout(() => {
+      socket.emit('stopTyping', { recipient: activeChat });
+    }, TYPING_TIMEOUT);
+  });
+
+  // Отримання подій друкування
+  const typingIndicator = document.getElementById('typingIndicator');
+
+  socket.on('typing', (data) => {
+    // Перевіряємо, чи ми зараз у тому чаті, де друкують
+    if (data.recipient === activeChat || (activeChat === data.sender && data.recipient === currentUser)) {
+      typingUsers.add(data.sender);
+      updateTypingDisplay();
+    }
+  });
+
+  socket.on('stopTyping', (data) => {
+    typingUsers.delete(data.sender);
+    updateTypingDisplay();
+  });
+
+  function updateTypingDisplay() {
+    if (typingUsers.size > 0) {
+      const usersArr = Array.from(typingUsers);
+      const text = usersArr.length > 2 ? 'Кілька людей друкують...' : `${usersArr.join(', ')} друкує...`;
+      typingIndicator.innerText = text;
+      typingIndicator.classList.remove('hidden');
+    } else {
+      typingIndicator.classList.add('hidden');
+    }
+  }
+
+  // Функція збільшення лічильника
+  function incrementUnread(chatId) {
+    unreadCounts[chatId] = (unreadCounts[chatId] || 0) + 1;
+    const badge = document.getElementById(`badge-${chatId}`);
+    if (badge) {
+      badge.innerText = unreadCounts[chatId];
+      badge.classList.remove('hidden');
+    }
+  }
+
+  // Очищення лічильника та індикатора при зміні чату
+  const originalSwitchChat = switchChat; // Зберігаємо стару логіку
+  switchChat = function(target) {
+    originalSwitchChat(target);
+    
+    // Скидаємо лічильник
+    unreadCounts[target] = 0;
+    const badge = document.getElementById(`badge-${target}`);
+    if (badge) badge.classList.add('hidden');
+    
+    // Очищаємо індикатори друкування
+    typingUsers.clear();
+    updateTypingDisplay();
+  };
 </script>
 
 </body>

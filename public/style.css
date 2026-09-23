@@ -295,3 +295,34 @@ body {
 .chat-form button:hover { 
   background: #0056b3; 
 }
+/* Індикатор "друкує..." */
+.typing-indicator {
+  padding: 5px 20px 10px;
+  font-size: 0.85rem;
+  color: #64748b;
+  font-style: italic;
+  background-color: #f8fafc;
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0% { opacity: 0.6; }
+  50% { opacity: 1; }
+  100% { opacity: 0.6; }
+}
+
+/* Лічильник непрочитаних (Бейдж) */
+.user-item {
+  position: relative; /* Щоб бейдж позиціонувався відносно елемента */
+}
+
+.unread-badge {
+  background-color: #ef4444; /* Червоний колір */
+  color: white;
+  font-size: 0.75rem;
+  font-weight: bold;
+  padding: 2px 7px;
+  border-radius: 12px;
+  margin-left: auto; /* Відштовхує бейдж у правий край */
+  box-shadow: 0 2px 4px rgba(239, 68, 68, 0.3);
+}

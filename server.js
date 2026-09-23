@@ -47,7 +47,7 @@ const privateMessageSchema = new mongoose.Schema({
 const PrivateMessage = mongoose.model('PrivateMessage', privateMessageSchema);
 
 // Глобальне сховище для списку користувачів онлайн
-const onlineUsers = new Map();
+const onlineUsers = new Set();
 
 // --- REST API МАРШРУТИ АВТОРИЗАЦІЇ ---
 
@@ -222,7 +222,7 @@ io.on('connection', async (socket) => {
   socket.join(username);
 
   // 3. Додаємо юзера в онлайн і сповіщаємо всіх
-  onlineUsers.set(username);
+  onlineUsers.add(username);
   io.emit('onlineUsers', Array.from(onlineUsers));
 
   // 4. Відправка історії загального чату під час підключення
@@ -288,6 +288,25 @@ io.on('connection', async (socket) => {
     io.emit('onlineUsers', Array.from(onlineUsers));
   });
 });
+
+// 8. Індикатор друкування
+  socket.on('typing', (data) => {
+    if (data.recipient === 'general') {
+      // Відправляємо всім, крім того, хто друкує
+      socket.broadcast.emit('typing', { sender: username, recipient: 'general' });
+    } else {
+      // Відправляємо конкретному користувачу в приватний чат
+      io.to(data.recipient).emit('typing', { sender: username, recipient: data.recipient });
+    }
+  });
+
+  socket.on('stopTyping', (data) => {
+    if (data.recipient === 'general') {
+      socket.broadcast.emit('stopTyping', { sender: username, recipient: 'general' });
+    } else {
+      io.to(data.recipient).emit('stopTyping', { sender: username, recipient: data.recipient });
+    }
+  });
 
 // --- ЗАПУСК СЕРВЕРА ---
 
