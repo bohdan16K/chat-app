@@ -11,8 +11,9 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_chat_key_123';
+const MAX_MSG_LENGTH = 2000; // Максимальна довжина повідомлення
 
-// Middleware для обробки JSON, статики та Cookie
+// Middleware
 app.use(express.json());
 app.use(cookieParser());
 app.use(express.static('public'));
@@ -21,36 +22,40 @@ app.use(express.static('public'));
 
 // 1. Схема користувача
 const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true, trim: true },
+  username: { type: String, required: true, unique: true, trim: true, lowercase: true },
   password: { type: String, required: true },
   createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', userSchema);
 
-// 2. Схема повідомлення
+// 2. Схема загальних повідомлень
 const messageSchema = new mongoose.Schema({
-  user: String,
-  text: String,
-  createdAt: { type: Date, default: Date.now }
+  user: { type: String, required: true },
+  text: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now, index: true }
 });
 const Message = mongoose.model('Message', messageSchema);
 
-// 3. Приватні повідомлення
+// 3. Схема приватних повідомлень (з складеним індексом)
 const privateMessageSchema = new mongoose.Schema({
   sender: { type: String, required: true },
   recipient: { type: String, required: true },
   text: { type: String, required: true },
   createdAt: { type: Date, default: Date.now }
 });
+
+// Індекс для прискорення вибірки історії листування двох користувачів
+privateMessageSchema.index({ sender: 1, recipient: 1, createdAt: 1 });
+privateMessageSchema.index({ recipient: 1, sender: 1, createdAt: 1 });
+
 const PrivateMessage = mongoose.model('PrivateMessage', privateMessageSchema);
 
 // Сховище користувачів онлайн (Map: username -> Set з ID сокетів)
-// Це вирішує проблему кількох вкладок у одного користувача
 const onlineUsers = new Map();
 
-// --- REST API МАРШРУТИ АВТОРИЗАЦІЇ ---
+// --- REST API МАРШРУТИ ---
 
-// Реєстрація (з автоматичною видачею токена)
+// Реєстрація
 app.post('/api/register', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -58,13 +63,18 @@ app.post('/api/register', async (req, res) => {
       return res.status(400).json({ error: 'Заповніть усі поля' });
     }
 
-    const existingUser = await User.findOne({ username });
+    if (username.length < 3 || username.length > 20) {
+      return res.status(400).json({ error: 'Логін повинен бути від 3 до 20 символів' });
+    }
+
+    const cleanUsername = username.trim().toLowerCase();
+    const existingUser = await User.findOne({ username: cleanUsername });
     if (existingUser) {
       return res.status(400).json({ error: 'Користувач вже існує' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const newUser = new User({ username, password: hashedPassword });
+    const newUser = new User({ username: cleanUsername, password: hashedPassword });
     await newUser.save();
 
     const token = jwt.sign(
@@ -80,18 +90,22 @@ app.post('/api/register', async (req, res) => {
       sameSite: 'lax'
     });
 
-    res.status(201).json({ success: true, username: newUser.username, message: 'Успішно зареєстровано' });
+    res.status(201).json({ success: true, username: newUser.username });
   } catch (err) {
     res.status(500).json({ error: 'Помилка реєстрації' });
   }
 });
 
-// Вхід (з "Запам'ятати мене")
+// Вхід
 app.post('/api/login', async (req, res) => {
   try {
     const { username, password, rememberMe } = req.body;
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Заповніть усі поля' });
+    }
 
-    const user = await User.findOne({ username });
+    const cleanUsername = username.trim().toLowerCase();
+    const user = await User.findOne({ username: cleanUsername });
     if (!user) {
       return res.status(400).json({ error: 'Невірні дані для входу' });
     }
@@ -138,7 +152,7 @@ app.post('/api/logout', (req, res) => {
   res.json({ success: true });
 });
 
-// Middleware авторизації
+// Middleware авторизації REST API
 const requireAuth = (req, res, next) => {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ error: 'Не авторизовано' });
@@ -153,7 +167,7 @@ const requireAuth = (req, res, next) => {
 // Список користувачів
 app.get('/api/users', requireAuth, async (req, res) => {
   try {
-    const users = await User.find({ username: { $ne: req.user.username } }, 'username');
+    const users = await User.find({ username: { $ne: req.user.username } }, 'username').lean();
     const usersWithStatus = users.map(user => ({
       username: user.username,
       isOnline: onlineUsers.has(user.username)
@@ -165,18 +179,21 @@ app.get('/api/users', requireAuth, async (req, res) => {
   }
 });
 
-// Історія приватного чату
+// Історія приватного чату (з використанням lean() для прискорення)
 app.get('/api/messages/:targetUser', requireAuth, async (req, res) => {
   try {
     const currentUser = req.user.username;
-    const targetUser = req.params.targetUser;
+    const targetUser = req.params.targetUser.toLowerCase();
 
     const history = await PrivateMessage.find({
       $or: [
         { sender: currentUser, recipient: targetUser },
         { sender: targetUser, recipient: currentUser }
       ]
-    }).sort({ createdAt: 1 });
+    })
+    .sort({ createdAt: 1 })
+    .limit(100)
+    .lean();
 
     res.json(history);
   } catch (err) {
@@ -185,7 +202,7 @@ app.get('/api/messages/:targetUser', requireAuth, async (req, res) => {
 });
 
 // ==========================================
-// --- SOCKET.IO МІДЛВЕР ТА ОБРОБКА З'ЄДНАНЬ ---
+// --- SOCKET.IO МІДЛВЕР ТА ОБРОБКАЗ'ЄДНАНЬ ---
 // ==========================================
 
 io.use((socket, next) => {
@@ -195,7 +212,6 @@ io.use((socket, next) => {
   const tokenCookie = reqCookies.split(';').find(c => c.trim().startsWith('token='));
   if (!tokenCookie) return next(new Error('Auth error'));
 
-  // Надійне витягування токена без split('=')
   const token = tokenCookie.trim().substring(6);
 
   try {
@@ -209,11 +225,9 @@ io.use((socket, next) => {
 
 io.on('connection', async (socket) => {
   const username = socket.user.username;
-  console.log(`Користувач ${username} підключився (Socket ID: ${socket.id})`);
 
   socket.join(username);
 
-  // Фіксація з'єднання у Map для підтримки кількох вкладок
   if (!onlineUsers.has(username)) {
     onlineUsers.set(username, new Set());
   }
@@ -224,26 +238,25 @@ io.on('connection', async (socket) => {
 
   // Відправка історії загального чату
   try {
-    const history = await Message.find().sort({ createdAt: 1 }).limit(50);
+    const history = await Message.find().sort({ createdAt: 1 }).limit(50).lean();
     socket.emit('chatHistory', history);
   } catch (err) {
-    console.error('Помилка завантаження історії:', err);
+    console.error('Помилка завантаження історії загального чату:', err);
   }
 
   // Загальне повідомлення
   socket.on('chatMessage', async (data) => {
     try {
-      if (!data.text?.trim()) return;
+      if (!data.text || typeof data.text !== 'string') return;
+      const text = data.text.trim();
+      if (!text || text.length > MAX_MSG_LENGTH) return;
 
-      const newMessage = new Message({
-        user: username,
-        text: data.text
-      });
+      const newMessage = new Message({ user: username, text });
       await newMessage.save();
 
-      io.emit('chatMessage', { user: username, text: data.text });
+      io.emit('chatMessage', { user: username, text, createdAt: newMessage.createdAt });
     } catch (err) {
-      console.error('Помилка збереження повідомлення:', err);
+      console.error('Помилка збереження загального повідомлення:', err);
     }
   });
 
@@ -251,62 +264,67 @@ io.on('connection', async (socket) => {
   socket.on('privateMessage', async (data) => {
     try {
       const { recipient, text } = data;
-      if (!recipient || !text?.trim()) return;
+      if (!recipient || !text || typeof text !== 'string') return;
+      
+      const cleanText = text.trim();
+      const cleanRecipient = recipient.trim().toLowerCase();
+
+      if (!cleanText || cleanText.length > MAX_MSG_LENGTH) return;
 
       const newMsg = new PrivateMessage({
         sender: username,
-        recipient: recipient,
-        text: text
+        recipient: cleanRecipient,
+        text: cleanText
       });
       await newMsg.save();
 
       const messageData = {
         sender: username,
-        recipient: recipient,
-        text: text,
+        recipient: cleanRecipient,
+        text: cleanText,
         createdAt: newMsg.createdAt
       };
 
-      // Надсилаємо отримувачу в його кімнату
-      io.to(recipient).emit('privateMessage', messageData);
+      // Надсилаємо отримувачу
+      io.to(cleanRecipient).emit('privateMessage', messageData);
 
-      // Надсилаємо відправнику в його кімнату (синхронізує всі його відкриті вкладки)
-      io.to(username).emit('privateMessage', messageData);
+      // Надсилаємо відправнику (якщо відправник і отримувач — різні користувачі)
+      if (cleanRecipient !== username) {
+        io.to(username).emit('privateMessage', messageData);
+      }
     } catch (err) {
       console.error('Помилка приватного повідомлення:', err);
     }
   });
 
-  // Індикатор друкування
+  // Індикатори друкування
   socket.on('typing', (data) => {
+    if (!data.recipient) return;
     if (data.recipient === 'general') {
       socket.broadcast.emit('typing', { sender: username, recipient: 'general' });
     } else {
-      io.to(data.recipient).emit('typing', { sender: username, recipient: data.recipient });
+      io.to(data.recipient.toLowerCase()).emit('typing', { sender: username, recipient: data.recipient.toLowerCase() });
     }
   });
 
   socket.on('stopTyping', (data) => {
+    if (!data.recipient) return;
     if (data.recipient === 'general') {
       socket.broadcast.emit('stopTyping', { sender: username, recipient: 'general' });
     } else {
-      io.to(data.recipient).emit('stopTyping', { sender: username, recipient: data.recipient });
+      io.to(data.recipient.toLowerCase()).emit('stopTyping', { sender: username, recipient: data.recipient.toLowerCase() });
     }
   });
 
   // Відключення користувача
   socket.on('disconnect', () => {
-    console.log(`Користувач ${username} відключився (Socket ID: ${socket.id})`);
-
     const userSockets = onlineUsers.get(username);
     if (userSockets) {
       userSockets.delete(socket.id);
-      // Видаляємо юзера з онлайну тільки якщо закрито ВСІ його вкладки
       if (userSockets.size === 0) {
         onlineUsers.delete(username);
       }
     }
-
     io.emit('onlineUsers', Array.from(onlineUsers.keys()));
   });
 });
