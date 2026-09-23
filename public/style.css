@@ -522,7 +522,7 @@ body {
 
 .chat-header {
   padding: 1rem;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid #003eba;
   display: flex;
   align-items: center;
   gap: 12px;
