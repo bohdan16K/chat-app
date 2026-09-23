@@ -643,3 +643,35 @@ body {
     display: inline-block !important;
   }
 }
+/* 1. Головний фон та межа лівого стовпця */
+.sidebar {
+  background-color: #1e1e2d; /* Вкажіть будь-який потрібний колір фону */
+  border-right: 1px solid #2b2b40;
+}
+
+/* 2. Верхній блок з ім'ям користувача та кнопкою "Вийти" */
+.sidebar-header {
+  background-color: #1a1a27; /* Темніший відтінок для шапки */
+  color: #ffffff;            /* Білий колір тексту "Вітаємо..." */
+  border-bottom: 1px solid #2b2b40;
+}
+
+/* 3. Заголовки "ЧАТИ" та "КОРИСТУВАЧІ" */
+.users-section h4 {
+  color: #92929f; /* Сірий колір заголовків */
+}
+
+/* 4. Текст елементів у списку (імена користувачів) */
+.user-item {
+  color: #ffffff; /* Текст стає чітким та білим */
+}
+
+/* 5. Колір блоку при наведенні або для активного чату */
+.user-item:hover {
+  background-color: #2b2b40;
+}
+
+.user-item.active {
+  background-color: #3699ff; /* Синій фокус для активного чату */
+  color: #ffffff;
+}
