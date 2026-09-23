@@ -6,7 +6,6 @@ const cookieParser = require('cookie-parser');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
-
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
@@ -36,7 +35,6 @@ const messageSchema = new mongoose.Schema({
 });
 const Message = mongoose.model('Message', messageSchema);
 
-
 // 3. Приватні повідомлення
 const privateMessageSchema = new mongoose.Schema({
   sender: { type: String, required: true },
@@ -51,7 +49,7 @@ const onlineUsers = new Set();
 
 // --- REST API МАРШРУТИ АВТОРИЗАЦІЇ ---
 
-// Реєстрація (оновлено: з автоматичною видачею токена)
+// Реєстрація (з автоматичною видачею токена)
 app.post('/api/register', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -141,8 +139,7 @@ app.post('/api/logout', (req, res) => {
   res.json({ success: true });
 });
 
-// Перевірка логіну
-
+// Перевірка авторизації для закритих маршрутів
 const requireAuth = (req, res, next) => {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ error: 'Не авторизовано' });
@@ -280,22 +277,11 @@ io.on('connection', async (socket) => {
     }
   });
 
-  // 7. Обробка відключення користувача
-  socket.on('disconnect', () => {
-    console.log(`Користувач ${username} відключився`);
-
-    onlineUsers.delete(username);
-    io.emit('onlineUsers', Array.from(onlineUsers));
-  });
-});
-
-// 8. Індикатор друкування
+  // 7. Індикатор друкування (тепер ВСЕРЕДИНІ io.on('connection'))
   socket.on('typing', (data) => {
     if (data.recipient === 'general') {
-      // Відправляємо всім, крім того, хто друкує
       socket.broadcast.emit('typing', { sender: username, recipient: 'general' });
     } else {
-      // Відправляємо конкретному користувачу в приватний чат
       io.to(data.recipient).emit('typing', { sender: username, recipient: data.recipient });
     }
   });
@@ -307,7 +293,16 @@ io.on('connection', async (socket) => {
       io.to(data.recipient).emit('stopTyping', { sender: username, recipient: data.recipient });
     }
   });
+
+  // 8. Обробка відключення користувача
+  socket.on('disconnect', () => {
+    console.log(`Користувач ${username} відключився`);
+
+    onlineUsers.delete(username);
+    io.emit('onlineUsers', Array.from(onlineUsers));
+  });
 });
+
 
 // --- ЗАПУСК СЕРВЕРА ---
 
