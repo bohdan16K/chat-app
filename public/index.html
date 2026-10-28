@@ -10,62 +10,64 @@
 
 <div class="app-container">
 
-  <!-- 1. Блок Авторизації -->
-  <div class="auth-box" id="authBox">
+  <!-- 1. Авторизація -->
+  <form class="auth-box" id="authForm" novalidate>
     <h2>Вхід у чат</h2>
+
     <div class="form-group">
       <label for="authUsername">Логін</label>
-      <input type="text" id="authUsername" placeholder="Введіть логін" required>
+      <input type="text" id="authUsername" placeholder="Введіть логін" autocomplete="username" maxlength="20" required>
     </div>
+
     <div class="form-group">
       <label for="authPassword">Пароль</label>
-      <input type="password" id="authPassword" placeholder="Введіть пароль" required>
+      <input type="password" id="authPassword" placeholder="Введіть пароль" autocomplete="current-password" maxlength="72" required>
     </div>
+
+    <p class="auth-error hidden" id="authError" role="alert"></p>
+
     <label class="checkbox-group">
       <input type="checkbox" id="rememberMe"> Запам'ятати мене
     </label>
-    <div class="auth-buttons">
-      <button class="btn" id="loginBtn">Увійти</button>
-      <button class="btn btn-secondary" id="registerBtn">Реєстрація</button>
-    </div>
-  </div>
 
-  <!-- 2. Блок Чату з сайдбаром -->
+    <div class="auth-buttons">
+      <button type="submit" class="btn" id="loginBtn">Увійти</button>
+      <button type="button" class="btn btn-secondary" id="registerBtn">Реєстрація</button>
+    </div>
+  </form>
+
+  <!-- 2. Чат із сайдбаром -->
   <div class="chat-app hidden" id="chatContainer">
-    <!-- Сайдбар -->
     <aside class="sidebar">
       <div class="sidebar-header">
         <span>Вітаємо, <strong id="userDisplay"></strong>!</span>
-        <button class="logout-btn" id="logoutBtn">Вийти</button>
+        <button type="button" class="logout-btn" id="logoutBtn">Вийти</button>
       </div>
 
       <div class="users-section">
         <h4>Чати</h4>
-        <div class="user-item active" id="generalChatBtn" data-chat="general">
+        <div class="user-item active" id="generalChatBtn" role="button" tabindex="0">
           <span class="status-dot online"></span>
           <span>📢 Загальний чат</span>
           <span class="unread-badge hidden" id="badge-general">0</span>
         </div>
 
         <h4>Користувачі</h4>
-        <div id="usersList" class="users-list">
-          <!-- Динамічний список користувачів -->
-        </div>
+        <div id="usersList" class="users-list"></div>
       </div>
     </aside>
 
-
-    <!-- Основне вікно чату -->
     <main class="chat-window">
       <header class="chat-header">
-        <button class="back-btn hidden" id="backBtn">← Чати</button>
+        <button type="button" class="back-btn" id="backBtn">← Чати</button>
         <h3 id="chatTitle">📢 Загальний чат</h3>
       </header>
 
       <div class="chat-messages" id="messages"></div>
       <div id="typingIndicator" class="typing-indicator hidden"></div>
+
       <form class="chat-form" id="chatForm">
-        <input type="text" id="messageInput" placeholder="Введіть повідомлення..." required autocomplete="off" />
+        <input type="text" id="messageInput" placeholder="Введіть повідомлення..." maxlength="2000" required autocomplete="off">
         <button type="submit">Надіслати</button>
       </form>
     </main>
@@ -73,325 +75,10 @@
 
 </div>
 
+<div class="toast hidden" id="toast" role="status"></div>
+
 <script src="/socket.io/socket.io.js"></script>
-<script>
-  let socket;
-  let currentUser = null;
-  let activeChat = 'general';
-  let typingTimer;
-  const TYPING_TIMEOUT = 1500;
-  let typingUsers = new Set();
-  let unreadCounts = {};
-  let onlineUsersSet = new Set();
-  let generalHistory = [];
-
-  // Елементи DOM
-  const authBox = document.getElementById('authBox');
-  const chatContainer = document.getElementById('chatContainer');
-  const authUsername = document.getElementById('authUsername');
-  const authPassword = document.getElementById('authPassword');
-  const rememberMe = document.getElementById('rememberMe');
-  const userDisplay = document.getElementById('userDisplay');
-  
-  const loginBtn = document.getElementById('loginBtn');
-  const registerBtn = document.getElementById('registerBtn');
-  const logoutBtn = document.getElementById('logoutBtn');
-  
-  const chatForm = document.getElementById('chatForm');
-  const messageInput = document.getElementById('messageInput');
-  const messages = document.getElementById('messages');
-  const chatTitle = document.getElementById('chatTitle');
-  const usersList = document.getElementById('usersList');
-  const generalChatBtn = document.getElementById('generalChatBtn');
-  const typingIndicator = document.getElementById('typingIndicator');
-
-  // Перевірка сесії при завантаженні
-  window.addEventListener('DOMContentLoaded', async () => {
-    try {
-      const res = await fetch('/api/me');
-      const data = await res.json();
-
-      if (data.authenticated) {
-        startChatSession(data.username);
-      }
-    } catch (err) {
-      console.error('Помилка перевірки сесії:', err);
-    }
-  });
-
-  // Вхід
-  loginBtn.addEventListener('click', async () => {
-    const username = authUsername.value.trim();
-    const password = authPassword.value.trim();
-
-    if (!username || !password) return alert('Заповніть усі поля!');
-
-    const res = await fetch('/api/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password, rememberMe: rememberMe.checked })
-    });
-
-    const data = await res.json();
-    if (data.success) {
-      startChatSession(data.username);
-    } else {
-      alert(data.error);
-    }
-  });
-
-  // Реєстрація
-  registerBtn.addEventListener('click', async () => {
-    const username = authUsername.value.trim();
-    const password = authPassword.value.trim();
-
-    if (!username || !password) return alert('Заповніть усі поля!');
-
-    const res = await fetch('/api/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password })
-    });
-
-    const data = await res.json();
-    if (data.success) {
-      alert('Реєстрація успішна! Тепер увійдіть.');
-    } else {
-      alert(data.error);
-    }
-  });
-
-  // Вихід
-  logoutBtn.addEventListener('click', async () => {
-    await fetch('/api/logout', { method: 'POST' });
-    window.location.reload();
-  });
-
-  // Ініціалізація Socket.IO
-  async function startChatSession(username) {
-    currentUser = username;
-    authBox.classList.add('hidden');
-    chatContainer.classList.remove('hidden');
-    userDisplay.innerText = username;
-
-    socket = io();
-
-    // 1. Початкова історія загального чату
-    socket.on('chatHistory', (history) => {
-      generalHistory = history;
-      if (activeChat === 'general') {
-        renderGeneralHistory();
-      }
-    });
-
-    // 2. Нові повідомлення загального чату
-    socket.on('chatMessage', (data) => {
-      generalHistory.push(data);
-      if (activeChat === 'general') {
-        appendMessage(data.user, data.text, data.user === currentUser);
-        scrollToBottom();
-      } else {
-        incrementUnread('general');
-      }
-    });
-
-    // 3. Приватні повідомлення
-    socket.on('privateMessage', (msg) => {
-      const isRelevant = 
-        (activeChat === msg.sender && msg.recipient === currentUser) || 
-        (activeChat === msg.recipient && msg.sender === currentUser);
-
-      if (isRelevant) {
-        appendMessage(msg.sender, msg.text, msg.sender === currentUser);
-        scrollToBottom();
-      } else {
-        incrementUnread(msg.sender);
-      }
-    });
-
-    // 4. Оновлення списку онлайну
-    socket.on('onlineUsers', (onlineArray) => {
-      onlineUsersSet = new Set(onlineArray);
-      updateOnlineStatusInList();
-    });
-
-    // 5. Події друкування
-    socket.on('typing', (data) => {
-      if (data.recipient === activeChat || (activeChat === data.sender && data.recipient === currentUser)) {
-        typingUsers.add(data.sender);
-        updateTypingDisplay();
-      }
-    });
-
-    socket.on('stopTyping', (data) => {
-      typingUsers.delete(data.sender);
-      updateTypingDisplay();
-    });
-
-    await loadUsers();
-
-    // Відправка повідомлень
-    chatForm.onsubmit = (e) => {
-      e.preventDefault();
-      const text = messageInput.value.trim();
-      if (!text) return;
-
-      if (activeChat === 'general') {
-        socket.emit('chatMessage', { text });
-      } else {
-        socket.emit('privateMessage', { recipient: activeChat, text });
-      }
-
-      messageInput.value = '';
-      messageInput.focus();
-    };
-
-    generalChatBtn.onclick = () => switchChat('general');
-  }
-
-  // Відмалювання збереженої історії загального чату
-  function renderGeneralHistory() {
-    messages.innerHTML = '';
-    generalHistory.forEach((data) => {
-      appendMessage(data.user, data.text, data.user === currentUser);
-    });
-    scrollToBottom();
-  }
-
-  // Перемикання чатів
-  function switchChat(target) {
-    activeChat = target;
-    messages.innerHTML = '';
-
-    document.querySelectorAll('.user-item').forEach(el => el.classList.remove('active'));
-
-    if (target === 'general') {
-      generalChatBtn.classList.add('active');
-      chatTitle.innerText = '📢 Загальний чат';
-      renderGeneralHistory();
-    } else {
-      const activeUserNode = document.querySelector(`.user-item[data-username="${target}"]`);
-      if (activeUserNode) activeUserNode.classList.add('active');
-      chatTitle.innerText = `💬 Приватний чат з ${target}`;
-      loadPrivateHistory(target);
-    }
-
-    // Скидаємо лічильник непрочитаних
-    unreadCounts[target] = 0;
-    const badge = document.getElementById(`badge-${target}`);
-    if (badge) badge.classList.add('hidden');
-
-    // Очищаємо індикатори друкування при зміні чату
-    typingUsers.clear();
-    updateTypingDisplay();
-  }
-
-  // Завантаження списку користувачів
-  async function loadUsers() {
-    try {
-      const res = await fetch('/api/users');
-      const users = await res.json();
-
-      usersList.innerHTML = '';
-      users
-        .filter(user => user.username !== currentUser) // Виключаємо самого себе
-        .forEach(user => {
-          const isOnline = onlineUsersSet.has(user.username) || user.isOnline;
-          const userDiv = document.createElement('div');
-          userDiv.className = 'user-item';
-          userDiv.dataset.username = user.username;
-
-          const currentUnread = unreadCounts[user.username] || 0;
-          const badgeClass = currentUnread > 0 ? 'unread-badge' : 'unread-badge hidden';
-
-          userDiv.innerHTML = `
-            <span class="status-dot ${isOnline ? 'online' : ''}"></span>
-            <span>${user.username}</span>
-            <span class="${badgeClass}" id="badge-${user.username}">${currentUnread}</span>
-          `;
-          
-          userDiv.onclick = () => switchChat(user.username);
-          usersList.appendChild(userDiv);
-        });
-    } catch (err) {
-      console.error('Помилка завантаження користувачів:', err);
-    }
-  }
-
-  // Завантаження приватних повідомлень
-  async function loadPrivateHistory(targetUser) {
-    try {
-      const res = await fetch(`/api/messages/${targetUser}`);
-      const history = await res.json();
-      messages.innerHTML = '';
-      history.forEach(msg => appendMessage(msg.sender, msg.text, msg.sender === currentUser));
-      scrollToBottom();
-    } catch (err) {
-      console.error('Помилка завантаження історії:', err);
-    }
-  }
-
-  // Оновлення статусу онлайну
-  function updateOnlineStatusInList() {
-    document.querySelectorAll('#usersList .user-item').forEach(userNode => {
-      const name = userNode.dataset.username;
-      const dot = userNode.querySelector('.status-dot');
-      if (dot) {
-        if (onlineUsersSet.has(name)) {
-          dot.classList.add('online');
-        } else {
-          dot.classList.remove('online');
-        }
-      }
-    });
-  }
-
-  // Додавання повідомлення у DOM
-  function appendMessage(author, text, isSelf) {
-    const msgDiv = document.createElement('div');
-    msgDiv.classList.add('message', isSelf ? 'sent' : 'received');
-    msgDiv.innerHTML = `
-      ${!isSelf ? `<span class="author">${author}</span>` : ''}
-      <div class="text">${text}</div>
-    `;
-    messages.appendChild(msgDiv);
-  }
-
-  function scrollToBottom() {
-    messages.scrollTop = messages.scrollHeight;
-  }
-
-  // Відслідковування вводу тексту
-  messageInput.addEventListener('input', () => {
-    socket.emit('typing', { recipient: activeChat });
-    
-    clearTimeout(typingTimer);
-    typingTimer = setTimeout(() => {
-      socket.emit('stopTyping', { recipient: activeChat });
-    }, TYPING_TIMEOUT);
-  });
-
-  function updateTypingDisplay() {
-    if (typingUsers.size > 0) {
-      const usersArr = Array.from(typingUsers);
-      const text = usersArr.length > 2 ? 'Кілька людей друкують...' : `${usersArr.join(', ')} друкує...`;
-      typingIndicator.innerText = text;
-      typingIndicator.classList.remove('hidden');
-    } else {
-      typingIndicator.classList.add('hidden');
-    }
-  }
-
-  // Збільшення лічильника непрочитаних
-  function incrementUnread(chatId) {
-    unreadCounts[chatId] = (unreadCounts[chatId] || 0) + 1;
-    const badge = document.getElementById(`badge-${chatId}`);
-    if (badge) {
-      badge.innerText = unreadCounts[chatId];
-      badge.classList.remove('hidden');
-    }
-  }
-</script>
+<script src="app.js"></script>
 
 </body>
 </html>
