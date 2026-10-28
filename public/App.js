@@ -315,7 +315,7 @@
     if (existing) clearTimeout(existing.timer);
 
     const timer = setTimeout(() => {
-      typingMap.delete(key); 
+      typingMap.delete(key);
       updateTypingDisplay();
     }, TYPING_EXPIRE);
     typingMap.set(key, { chat, sender, timer });
