@@ -1,477 +1,438 @@
-(() => {
-  'use strict';
+const express = require('express');
+const http = require('http');
+const path = require('path');
+const crypto = require('crypto');
+const { Server } = require('socket.io');
+const mongoose = require('mongoose');
+const cookieParser = require('cookie-parser');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 
-  // --- Константи ---
-  const TYPING_STOP_DELAY = 1500;   // через скільки мс бездіяльності надсилаємо stopTyping
-  const TYPING_EMIT_INTERVAL = 1000; // не частіше ніж раз на секунду надсилаємо typing
-  const TYPING_EXPIRE = 3500;       // страховка: прибрати індикатор, якщо stopTyping загубився
-  const GENERAL_HISTORY_CAP = 200;
-  const BASE_TITLE = 'Real-Time Chat';
+const IS_PROD = process.env.NODE_ENV === 'production';
 
-  // --- Стан ---
-  let socket = null;
-  let currentUser = null;
-  let activeChat = 'general';
-  let users = [];
-  let generalHistory = [];
-  let sessionStarted = false;
-  let typingChat = null;
-  let typingStopTimer = null;
-  let lastTypingEmit = 0;
-  let toastTimer = null;
+// --- Налаштування ---
 
-  const unreadCounts = {};
-  const onlineUsersSet = new Set();
-  const typingMap = new Map(); // "chat|sender" -> { chat, sender, timer }
-
-  // --- DOM ---
-  const $ = (id) => document.getElementById(id);
-  const authForm = $('authForm');
-  const authUsername = $('authUsername');
-  const authPassword = $('authPassword');
-  const authError = $('authError');
-  const rememberMe = $('rememberMe');
-  const loginBtn = $('loginBtn');
-  const registerBtn = $('registerBtn');
-  const logoutBtn = $('logoutBtn');
-  const chatContainer = $('chatContainer');
-  const userDisplay = $('userDisplay');
-  const generalChatBtn = $('generalChatBtn');
-  const generalBadge = $('badge-general');
-  const usersList = $('usersList');
-  const chatTitle = $('chatTitle');
-  const backBtn = $('backBtn');
-  const messages = $('messages');
-  const typingIndicator = $('typingIndicator');
-  const chatForm = $('chatForm');
-  const messageInput = $('messageInput');
-  const toast = $('toast');
-
-  // --- Утиліти ---
-  async function api(url, options = {}) {
-    const res = await fetch(url, {
-      headers: { 'Content-Type': 'application/json' },
-      ...options
-    });
-    let data = {};
-    try {
-      data = await res.json();
-    } catch {
-      /* порожня або не-JSON відповідь */
-    }
-    return { ok: res.ok, data };
+let JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  if (IS_PROD) {
+    console.error('JWT_SECRET не вказано в змінних середовища!');
+    process.exit(1);
   }
+  // У розробці генеруємо тимчасовий секрет (токени стануть недійсними після перезапуску)
+  JWT_SECRET = crypto.randomBytes(32).toString('hex');
+  console.warn('JWT_SECRET не задано: використовується тимчасовий випадковий секрет.');
+}
 
-  function showToast(text) {
-    toast.textContent = text;
-    toast.classList.remove('hidden');
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => toast.classList.add('hidden'), 3500);
+const MAX_MSG_LENGTH = 2000;
+const HISTORY_LIMIT_GENERAL = 50;
+const HISTORY_LIMIT_PRIVATE = 100;
+const USERNAME_RE = /^[\p{L}\p{N}_.-]{3,20}$/u;
+const PASSWORD_MIN = 6;
+const PASSWORD_MAX = 72; // обмеження bcrypt
+const RESERVED_USERNAMES = new Set(['general']); // 'general' — службовий ідентифікатор загального чату
+
+const app = express();
+if (IS_PROD) app.set('trust proxy', 1); // за reverse proxy (Render, Railway тощо), щоб rate limit бачив реальний IP
+
+const server = http.createServer(app);
+
+// Перевірка Origin: запити з інших сайтів відхиляємо (захист від CSRF / cross-site WebSocket)
+function isSameOrigin(origin, host) {
+  if (!origin) return true; // не-браузерні клієнти та звичайні same-origin GET
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
   }
+}
 
-  function formatTime(value) {
-    if (!value) return '';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return '';
-    return date.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' });
-  }
+const io = new Server(server, {
+  allowRequest: (req, callback) => callback(null, isSameOrigin(req.headers.origin, req.headers.host))
+});
 
-  const isMobile = () => window.matchMedia('(max-width: 768px)').matches;
+// --- Middleware ---
 
-  // --- Авторизація ---
-  function showAuthError(text) {
-    authError.textContent = text;
-    authError.classList.toggle('hidden', !text);
-  }
-
-  function setAuthBusy(busy) {
-    loginBtn.disabled = busy;
-    registerBtn.disabled = busy;
-  }
-
-  async function authRequest(kind) {
-    const username = authUsername.value.trim();
-    const password = authPassword.value; // пароль не обрізаємо
-    if (!username || !password) return showAuthError('Заповніть усі поля!');
-
-    showAuthError('');
-    setAuthBusy(true);
-    try {
-      const { ok, data } = await api(`/api/${kind}`, {
-        method: 'POST',
-        body: JSON.stringify({ username, password, rememberMe: rememberMe.checked })
-      });
-      if (ok && data.success) {
-        authPassword.value = '';
-        startChatSession(data.username); // після реєстрації сервер теж видає cookie
-      } else {
-        showAuthError(data.error || 'Сталася помилка');
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+        'upgrade-insecure-requests': null // щоб працювало на http://localhost
       }
-    } catch {
-      showAuthError('Немає зв\u2019язку з сервером');
-    } finally {
-      setAuthBusy(false);
     }
-  }
+  })
+);
+app.use(express.json({ limit: '10kb' }));
+app.use(cookieParser());
+app.use(express.static(path.join(__dirname, 'public')));
 
-  authForm.addEventListener('submit', (e) => {
-    e.preventDefault();
-    authRequest('login');
+app.use('/api', (req, res, next) => {
+  if (req.method !== 'GET' && !isSameOrigin(req.headers.origin, req.headers.host)) {
+    return res.status(403).json({ error: 'Заборонений запит' });
+  }
+  next();
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Забагато спроб. Спробуйте пізніше.' }
+});
+app.use('/api/login', authLimiter);
+app.use('/api/register', authLimiter);
+
+// --- Схеми та моделі MongoDB ---
+
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true, trim: true, lowercase: true },
+  password: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+const User = mongoose.model('User', userSchema);
+
+const messageSchema = new mongoose.Schema({
+  user: { type: String, required: true },
+  text: { type: String, required: true, maxlength: MAX_MSG_LENGTH },
+  createdAt: { type: Date, default: Date.now, index: true }
+});
+const Message = mongoose.model('Message', messageSchema);
+
+const privateMessageSchema = new mongoose.Schema({
+  sender: { type: String, required: true },
+  recipient: { type: String, required: true },
+  text: { type: String, required: true, maxlength: MAX_MSG_LENGTH },
+  createdAt: { type: Date, default: Date.now }
+});
+privateMessageSchema.index({ sender: 1, recipient: 1, createdAt: 1 });
+privateMessageSchema.index({ recipient: 1, sender: 1, createdAt: 1 });
+const PrivateMessage = mongoose.model('PrivateMessage', privateMessageSchema);
+
+// username -> Set з ID сокетів
+const onlineUsers = new Map();
+
+// --- Допоміжні функції ---
+
+function issueToken(res, user, rememberMe) {
+  const days = rememberMe ? 30 : 1;
+  const token = jwt.sign({ userId: user._id, username: user.username }, JWT_SECRET, {
+    expiresIn: `${days}d`
   });
-  registerBtn.addEventListener('click', () => authRequest('register'));
-
-  logoutBtn.addEventListener('click', async () => {
-    try {
-      await api('/api/logout', { method: 'POST' });
-    } finally {
-      window.location.reload();
-    }
+  res.cookie('token', token, {
+    httpOnly: true,
+    maxAge: days * 24 * 60 * 60 * 1000,
+    secure: IS_PROD,
+    sameSite: 'lax'
   });
+}
 
-  // --- Повідомлення ---
-  function createMessageEl({ author, text, createdAt }, showAuthor) {
-    const isSelf = author === currentUser;
-    const el = document.createElement('div');
-    el.className = `message ${isSelf ? 'sent' : 'received'}`;
-
-    if (!isSelf && showAuthor) {
-      const authorEl = document.createElement('span');
-      authorEl.className = 'author';
-      authorEl.textContent = author;
-      el.appendChild(authorEl);
-    }
-
-    const textEl = document.createElement('div');
-    textEl.className = 'text';
-    textEl.textContent = text; // textContent — захист від XSS
-    el.appendChild(textEl);
-
-    const time = formatTime(createdAt);
-    if (time) {
-      const timeEl = document.createElement('span');
-      timeEl.className = 'time';
-      timeEl.textContent = time;
-      el.appendChild(timeEl);
-    }
-    return el;
+function getTokenFromCookieHeader(header = '') {
+  for (const part of header.split(';')) {
+    const [key, ...rest] = part.trim().split('=');
+    if (key === 'token') return decodeURIComponent(rest.join('='));
   }
+  return null;
+}
 
-  function isNearBottom() {
-    return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 120;
-  }
-
-  function scrollToBottom() {
-    messages.scrollTop = messages.scrollHeight;
-  }
-
-  function renderMessages(items) {
-    const showAuthor = activeChat === 'general';
-    const fragment = document.createDocumentFragment();
-    items.forEach((item) => fragment.appendChild(createMessageEl(item, showAuthor)));
-    messages.replaceChildren(fragment);
-    scrollToBottom();
-  }
-
-  function appendMessage(item) {
-    const stick = isNearBottom() || item.author === currentUser;
-    messages.appendChild(createMessageEl(item, activeChat === 'general'));
-    if (stick) scrollToBottom();
-  }
-
-  function renderGeneralHistory() {
-    renderMessages(
-      generalHistory.map((m) => ({ author: m.user, text: m.text, createdAt: m.createdAt }))
-    );
-  }
-
-  async function loadPrivateHistory(target) {
-    try {
-      const { ok, data } = await api(`/api/messages/${encodeURIComponent(target)}`);
-      if (activeChat !== target) return; // користувач уже перейшов в інший чат
-      if (!ok) throw new Error(data.error || 'history error');
-      renderMessages(
-        data.map((m) => ({ author: m.sender, text: m.text, createdAt: m.createdAt }))
-      );
-    } catch (err) {
-      console.error('Помилка завантаження історії:', err);
-      showToast('Не вдалося завантажити історію');
-    }
-  }
-
-  // --- Список користувачів ---
-  function renderUsers() {
-    const sorted = [...users].sort(
-      (a, b) =>
-        Number(onlineUsersSet.has(b)) - Number(onlineUsersSet.has(a)) || a.localeCompare(b, 'uk')
-    );
-
-    const fragment = document.createDocumentFragment();
-    sorted.forEach((name) => {
-      const item = document.createElement('div');
-      item.className = 'user-item' + (activeChat === name ? ' active' : '');
-      item.dataset.username = name;
-      item.setAttribute('role', 'button');
-      item.tabIndex = 0;
-
-      const dot = document.createElement('span');
-      dot.className = 'status-dot' + (onlineUsersSet.has(name) ? ' online' : '');
-
-      const label = document.createElement('span');
-      label.textContent = name;
-
-      const count = unreadCounts[name] || 0;
-      const badge = document.createElement('span');
-      badge.className = 'unread-badge' + (count > 0 ? '' : ' hidden');
-      badge.textContent = count;
-
-      item.append(dot, label, badge);
-      item.addEventListener('click', () => switchChat(name));
-      item.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          switchChat(name);
-        }
-      });
-      fragment.appendChild(item);
-    });
-    usersList.replaceChildren(fragment);
-  }
-
-  function addUser(name) {
-    if (!name || name === currentUser || users.includes(name)) return;
-    users.push(name);
-    renderUsers();
-  }
-
-  async function loadUsers() {
-    try {
-      const { ok, data } = await api('/api/users');
-      if (!ok) return;
-      users = data.map((u) => u.username).filter((name) => name !== currentUser);
-      renderUsers();
-    } catch (err) {
-      console.error('Помилка завантаження користувачів:', err);
-    }
-  }
-
-  // --- Непрочитані ---
-  function updateGeneralBadge() {
-    const count = unreadCounts.general || 0;
-    generalBadge.textContent = count;
-    generalBadge.classList.toggle('hidden', count === 0);
-  }
-
-  function updateDocumentTitle() {
-    const total = Object.values(unreadCounts).reduce((sum, n) => sum + n, 0);
-    document.title = total > 0 ? `(${total}) ${BASE_TITLE}` : BASE_TITLE;
-  }
-
-  function incrementUnread(chatId) {
-    unreadCounts[chatId] = (unreadCounts[chatId] || 0) + 1;
-    if (chatId === 'general') updateGeneralBadge();
-    else renderUsers();
-    updateDocumentTitle();
-  }
-
-  // --- Перемикання чатів ---
-  function switchChat(target) {
-    if (typingChat) stopTypingNow();
-
-    activeChat = target;
-    unreadCounts[target] = 0;
-
-    generalChatBtn.classList.toggle('active', target === 'general');
-    updateGeneralBadge();
-    updateDocumentTitle();
-    renderUsers();
-    updateTypingDisplay();
-
-    messages.replaceChildren();
-    if (target === 'general') {
-      chatTitle.textContent = '📢 Загальний чат';
-      renderGeneralHistory();
-    } else {
-      chatTitle.textContent = `💬 Приватний чат з ${target}`;
-      loadPrivateHistory(target);
-    }
-
-    $('chatContainer').classList.add('mobile-chat-open');
-    if (!isMobile()) messageInput.focus();
-  }
-
-  generalChatBtn.addEventListener('click', () => switchChat('general'));
-  generalChatBtn.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      switchChat('general');
-    }
-  });
-  backBtn.addEventListener('click', () => chatContainer.classList.remove('mobile-chat-open'));
-
-  // --- Індикатор друкування ---
-  function setTyping(chat, sender) {
-    const key = `${chat}|${sender}`;
-    const existing = typingMap.get(key);
-    if (existing) clearTimeout(existing.timer);
-
-    const timer = setTimeout(() => {
-      typingMap.delete(key);
-      updateTypingDisplay();
-    }, TYPING_EXPIRE);
-    typingMap.set(key, { chat, sender, timer });
-  }
-
-  function clearTyping(chat, sender) {
-    const key = `${chat}|${sender}`;
-    const existing = typingMap.get(key);
-    if (existing) {
-      clearTimeout(existing.timer);
-      typingMap.delete(key);
-    }
-  }
-
-  function updateTypingDisplay() {
-    const names = [...typingMap.values()].filter((t) => t.chat === activeChat).map((t) => t.sender);
-
-    if (names.length === 0) {
-      typingIndicator.classList.add('hidden');
-      return;
-    }
-
-    let text;
-    if (names.length === 1) text = `${names[0]} друкує...`;
-    else if (names.length === 2) text = `${names[0]}, ${names[1]} друкують...`;
-    else text = 'Кілька людей друкують...';
-
-    typingIndicator.textContent = text;
-    typingIndicator.classList.remove('hidden');
-  }
-
-  function stopTypingNow() {
-    clearTimeout(typingStopTimer);
-    lastTypingEmit = 0;
-    if (socket && typingChat) {
-      socket.emit('stopTyping', { recipient: typingChat });
-    }
-    typingChat = null;
-  }
-
-  messageInput.addEventListener('input', () => {
-    if (!socket) return;
-
+// Простий ліміт частоти: не більше `max` подій за `windowMs`
+function createRateLimiter(max, windowMs) {
+  let stamps = [];
+  return () => {
     const now = Date.now();
-    if (now - lastTypingEmit > TYPING_EMIT_INTERVAL) {
-      typingChat = activeChat;
-      socket.emit('typing', { recipient: typingChat });
-      lastTypingEmit = now;
+    stamps = stamps.filter((t) => now - t < windowMs);
+    if (stamps.length >= max) return false;
+    stamps.push(now);
+    return true;
+  };
+}
+
+// Остання N повідомлень у хронологічному порядку
+async function latestMessages(query, limit) {
+  const docs = await query.sort({ createdAt: -1 }).limit(limit).lean();
+  return docs.reverse();
+}
+
+// --- REST API ---
+
+app.post('/api/register', async (req, res) => {
+  try {
+    const { username, password, rememberMe } = req.body || {};
+    if (typeof username !== 'string' || typeof password !== 'string' || !username.trim() || !password) {
+      return res.status(400).json({ error: 'Заповніть усі поля' });
     }
 
-    clearTimeout(typingStopTimer);
-    typingStopTimer = setTimeout(stopTypingNow, TYPING_STOP_DELAY);
-  });
-
-  // --- Відправка ---
-  chatForm.addEventListener('submit', (e) => {
-    e.preventDefault();
-    if (!socket) return;
-
-    const text = messageInput.value.trim();
-    if (!text) return;
-
-    if (activeChat === 'general') {
-      socket.emit('chatMessage', { text });
-    } else {
-      socket.emit('privateMessage', { recipient: activeChat, text });
+    const cleanUsername = username.trim().toLowerCase();
+    if (!USERNAME_RE.test(cleanUsername)) {
+      return res.status(400).json({
+        error: 'Логін: 3–20 символів (літери, цифри, _ . -)'
+      });
+    }
+    if (RESERVED_USERNAMES.has(cleanUsername)) {
+      return res.status(400).json({ error: 'Цей логін зарезервовано' });
+    }
+    if (password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) {
+      return res.status(400).json({
+        error: `Пароль повинен містити від ${PASSWORD_MIN} до ${PASSWORD_MAX} символів`
+      });
     }
 
-    stopTypingNow();
-    messageInput.value = '';
-    messageInput.focus();
-  });
+    if (await User.exists({ username: cleanUsername })) {
+      return res.status(400).json({ error: 'Користувач вже існує' });
+    }
 
-  // --- Socket.IO ---
-  function startChatSession(username) {
-    if (sessionStarted) return;
-    sessionStarted = true;
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = await User.create({ username: cleanUsername, password: hashedPassword });
 
-    currentUser = username;
-    authForm.classList.add('hidden');
-    chatContainer.classList.remove('hidden');
-    userDisplay.textContent = username;
+    issueToken(res, newUser, Boolean(rememberMe));
 
-    socket = io();
+    // Повідомляємо всіх, щоб новий користувач одразу з'явився у списках
+    io.emit('userRegistered', { username: newUser.username });
 
-    // Спрацьовує і при першому підключенні, і при перепідключенні
-    socket.on('connect', () => {
-      loadUsers();
-      if (activeChat !== 'general') loadPrivateHistory(activeChat);
-    });
+    res.status(201).json({ success: true, username: newUser.username });
+  } catch (err) {
+    if (err && err.code === 11000) {
+      return res.status(400).json({ error: 'Користувач вже існує' });
+    }
+    console.error('Помилка реєстрації:', err);
+    res.status(500).json({ error: 'Помилка реєстрації' });
+  }
+});
 
-    socket.on('connect_error', (err) => {
-      if (err && err.message === 'Auth error') window.location.reload();
-    });
+app.post('/api/login', async (req, res) => {
+  try {
+    const { username, password, rememberMe } = req.body || {};
+    if (typeof username !== 'string' || typeof password !== 'string' || !username.trim() || !password) {
+      return res.status(400).json({ error: 'Заповніть усі поля' });
+    }
 
-    socket.on('chatHistory', (history) => {
-      generalHistory = history;
-      if (activeChat === 'general') renderGeneralHistory();
-    });
+    const user = await User.findOne({ username: username.trim().toLowerCase() });
+    const isMatch = user ? await bcrypt.compare(password, user.password) : false;
+    if (!isMatch) {
+      return res.status(400).json({ error: 'Невірні дані для входу' });
+    }
 
-    socket.on('chatMessage', (data) => {
-      generalHistory.push(data);
-      if (generalHistory.length > GENERAL_HISTORY_CAP) generalHistory.shift();
-      clearTyping('general', data.user);
+    issueToken(res, user, Boolean(rememberMe));
+    res.json({ success: true, username: user.username });
+  } catch (err) {
+    console.error('Помилка авторизації:', err);
+    res.status(500).json({ error: 'Помилка авторизації' });
+  }
+});
 
-      if (activeChat === 'general') {
-        appendMessage({ author: data.user, text: data.text, createdAt: data.createdAt });
-        updateTypingDisplay();
-      } else if (data.user !== currentUser) {
-        incrementUnread('general');
-      }
-    });
+app.get('/api/me', (req, res) => {
+  const token = req.cookies.token;
+  if (!token) return res.status(401).json({ authenticated: false });
 
-    socket.on('privateMessage', (msg) => {
-      const peer = msg.sender === currentUser ? msg.recipient : msg.sender;
-      clearTyping(peer, msg.sender);
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    res.json({ authenticated: true, username: decoded.username });
+  } catch {
+    res.status(401).json({ authenticated: false });
+  }
+});
 
-      if (activeChat === peer) {
-        appendMessage({ author: msg.sender, text: msg.text, createdAt: msg.createdAt });
-        updateTypingDisplay();
-      } else if (msg.sender !== currentUser) {
-        addUser(peer); // повідомлення від користувача, якого ще немає у списку
-        incrementUnread(peer);
-      }
-    });
+app.post('/api/logout', (req, res) => {
+  res.clearCookie('token');
+  res.json({ success: true });
+});
 
-    socket.on('onlineUsers', (list) => {
-      onlineUsersSet.clear();
-      list.forEach((name) => onlineUsersSet.add(name));
-      renderUsers();
-    });
+const requireAuth = (req, res, next) => {
+  const token = req.cookies.token;
+  if (!token) return res.status(401).json({ error: 'Не авторизовано' });
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    res.status(401).json({ error: 'Не авторизовано' });
+  }
+};
 
-    socket.on('userRegistered', ({ username: name }) => addUser(name));
+app.get('/api/users', requireAuth, async (req, res) => {
+  try {
+    const users = await User.find({ username: { $ne: req.user.username } }, 'username')
+      .sort({ username: 1 })
+      .lean();
+    res.json(
+      users.map((user) => ({
+        username: user.username,
+        isOnline: onlineUsers.has(user.username)
+      }))
+    );
+  } catch (err) {
+    console.error('Помилка завантаження користувачів:', err);
+    res.status(500).json({ error: 'Помилка завантаження користувачів' });
+  }
+});
 
-    socket.on('typing', (data) => {
-      const chat = data.recipient === 'general' ? 'general' : data.sender;
-      setTyping(chat, data.sender);
-      updateTypingDisplay();
-    });
+app.get('/api/messages/:targetUser', requireAuth, async (req, res) => {
+  try {
+    const currentUser = req.user.username;
+    const targetUser = String(req.params.targetUser).trim().toLowerCase();
 
-    socket.on('stopTyping', (data) => {
-      const chat = data.recipient === 'general' ? 'general' : data.sender;
-      clearTyping(chat, data.sender);
-      updateTypingDisplay();
-    });
+    const history = await latestMessages(
+      PrivateMessage.find({
+        $or: [
+          { sender: currentUser, recipient: targetUser },
+          { sender: targetUser, recipient: currentUser }
+        ]
+      }),
+      HISTORY_LIMIT_PRIVATE
+    );
 
-    socket.on('errorMessage', showToast);
+    res.json(history);
+  } catch (err) {
+    console.error('Помилка завантаження історії:', err);
+    res.status(500).json({ error: 'Помилка завантаження історії' });
+  }
+});
+
+// Обробник помилок (наприклад, некоректний JSON)
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Некоректний запит' });
+  }
+  console.error(err);
+  res.status(500).json({ error: 'Внутрішня помилка сервера' });
+});
+
+// --- Socket.IO ---
+
+io.use((socket, next) => {
+  try {
+    const token = getTokenFromCookieHeader(socket.handshake.headers.cookie);
+    if (!token) return next(new Error('Auth error'));
+    socket.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    next(new Error('Auth error'));
+  }
+});
+
+io.on('connection', async (socket) => {
+  const username = socket.user.username;
+  const canSend = createRateLimiter(10, 5000); // до 10 повідомлень за 5 секунд
+
+  socket.join(username);
+
+  if (!onlineUsers.has(username)) {
+    onlineUsers.set(username, new Set());
+  }
+  onlineUsers.get(username).add(socket.id);
+  io.emit('onlineUsers', Array.from(onlineUsers.keys()));
+
+  try {
+    const history = await latestMessages(Message.find(), HISTORY_LIMIT_GENERAL);
+    socket.emit('chatHistory', history);
+  } catch (err) {
+    console.error('Помилка завантаження історії загального чату:', err);
   }
 
-  // --- Перевірка сесії при завантаженні ---
-  (async () => {
+  socket.on('chatMessage', async (data) => {
     try {
-      const { ok, data } = await api('/api/me');
-      if (ok && data.authenticated) startChatSession(data.username);
+      if (!data || typeof data.text !== 'string') return;
+      const text = data.text.trim();
+      if (!text) return;
+      if (text.length > MAX_MSG_LENGTH) {
+        return socket.emit('errorMessage', `Повідомлення задовге (максимум ${MAX_MSG_LENGTH} символів)`);
+      }
+      if (!canSend()) {
+        return socket.emit('errorMessage', 'Надто часто. Зачекайте кілька секунд.');
+      }
+
+      const newMessage = await Message.create({ user: username, text });
+      io.emit('chatMessage', { user: username, text, createdAt: newMessage.createdAt });
     } catch (err) {
-      console.error('Помилка перевірки сесії:', err);
+      console.error('Помилка збереження загального повідомлення:', err);
     }
-  })();
-})();
+  });
+
+  socket.on('privateMessage', async (data) => {
+    try {
+      if (!data || typeof data.recipient !== 'string' || typeof data.text !== 'string') return;
+
+      const cleanText = data.text.trim();
+      const cleanRecipient = data.recipient.trim().toLowerCase();
+      if (!cleanText || !cleanRecipient) return;
+      if (cleanText.length > MAX_MSG_LENGTH) {
+        return socket.emit('errorMessage', `Повідомлення задовге (максимум ${MAX_MSG_LENGTH} символів)`);
+      }
+      if (!canSend()) {
+        return socket.emit('errorMessage', 'Надто часто. Зачекайте кілька секунд.');
+      }
+      if (!(await User.exists({ username: cleanRecipient }))) {
+        return socket.emit('errorMessage', 'Такого користувача не існує');
+      }
+
+      const newMsg = await PrivateMessage.create({
+        sender: username,
+        recipient: cleanRecipient,
+        text: cleanText
+      });
+
+      const messageData = {
+        sender: username,
+        recipient: cleanRecipient,
+        text: cleanText,
+        createdAt: newMsg.createdAt
+      };
+
+      io.to(cleanRecipient).emit('privateMessage', messageData);
+      if (cleanRecipient !== username) {
+        io.to(username).emit('privateMessage', messageData);
+      }
+    } catch (err) {
+      console.error('Помилка приватного повідомлення:', err);
+    }
+  });
+
+  const relayTyping = (eventName) => (data) => {
+    const recipient =
+      data && typeof data.recipient === 'string' ? data.recipient.trim().toLowerCase() : '';
+    if (!recipient) return;
+
+    if (recipient === 'general') {
+      socket.broadcast.emit(eventName, { sender: username, recipient: 'general' });
+    } else if (recipient !== username) {
+      io.to(recipient).emit(eventName, { sender: username, recipient });
+    }
+  };
+  socket.on('typing', relayTyping('typing'));
+  socket.on('stopTyping', relayTyping('stopTyping'));
+
+  socket.on('disconnect', () => {
+    const userSockets = onlineUsers.get(username);
+    if (userSockets) {
+      userSockets.delete(socket.id);
+      if (userSockets.size === 0) onlineUsers.delete(username);
+    }
+    io.emit('onlineUsers', Array.from(onlineUsers.keys()));
+  });
+});
+
+// --- Запуск ---
+
+const PORT = process.env.PORT || 3000;
+const MONGO_URI = process.env.MONGO_URI;
+
+async function start() {
+  try {
+    if (!MONGO_URI) {
+      throw new Error('MONGO_URI не вказано в змінних середовища!');
+    }
+
+    await mongoose.connect(MONGO_URI);
+    console.log('Успішно підключено до MongoDB');
+
+    server.listen(PORT, () => {
+      console.log(`Сервер запущено на порту ${PORT}`);
+    });
+  } catch (err) {
+    console.error('Помилка запуску сервера:', err);
+    process.exit(1);
+  }
+}
+
+start();
