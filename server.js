@@ -12,7 +12,9 @@ const rateLimit = require('express-rate-limit');
 
 const IS_PROD = process.env.NODE_ENV === 'production';
 
-// --- Налаштування ---
+// ==========================================
+// Налаштування
+// ==========================================
 
 let JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
@@ -26,15 +28,29 @@ if (!JWT_SECRET) {
 }
 
 const MAX_MSG_LENGTH = 2000;
-const HISTORY_LIMIT_GENERAL = 50;
-const HISTORY_LIMIT_PRIVATE = 100;
+const PAGE_SIZE = 50;
+const PAGE_SIZE_MAX = 100;
+const REPLY_SNIPPET_LENGTH = 140;
 const USERNAME_RE = /^[\p{L}\p{N}_.-]{3,20}$/u;
 const PASSWORD_MIN = 6;
 const PASSWORD_MAX = 72; // обмеження bcrypt
-const RESERVED_USERNAMES = new Set(['general']); // 'general' — службовий ідентифікатор загального чату
+const RESERVED_USERNAMES = new Set(['general']); // службовий ідентифікатор загального чату
+const MAX_GROUP_TITLE = 40;
+const MAX_GROUP_MEMBERS = 50;
+// Дозволені реакції (мають збігатися з клієнтом)
+const ALLOWED_REACTIONS = new Set([
+  '👍', // 👍
+  '❤️', // ❤️
+  '😂', // 😂
+  '😮', // 😮
+  '😢', // 😢
+  '🙏' //  🙏
+]);
+
+const isId = (value) => typeof value === 'string' && /^[a-f\d]{24}$/i.test(value);
 
 const app = express();
-if (IS_PROD) app.set('trust proxy', 1); // за reverse proxy (Render, Railway тощо), щоб rate limit бачив реальний IP
+if (IS_PROD) app.set('trust proxy', 1); // за reverse proxy (Render, Railway тощо)
 
 const server = http.createServer(app);
 
@@ -52,7 +68,14 @@ const io = new Server(server, {
   allowRequest: (req, callback) => callback(null, isSameOrigin(req.headers.origin, req.headers.host))
 });
 
-// --- Middleware ---
+// ==========================================
+// Middleware
+// ==========================================
+
+// Health-check (для зовнішнього моніторингу / «будильника» Render)
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', db: mongoose.connection.readyState === 1, uptime: Math.round(process.uptime()) });
+});
 
 app.use(
   helmet({
@@ -75,6 +98,18 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
+// Загальний ліміт на API та суворіший — на дії з паролем
+app.use(
+  '/api',
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: 300,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Забагато запитів. Спробуйте трохи пізніше.' }
+  })
+);
+
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 30,
@@ -84,37 +119,93 @@ const authLimiter = rateLimit({
 });
 app.use('/api/login', authLimiter);
 app.use('/api/register', authLimiter);
+app.use('/api/change-password', authLimiter);
+app.use('/api/delete-account', authLimiter);
 
-// --- Схеми та моделі MongoDB ---
+// ==========================================
+// Схеми та моделі MongoDB
+// ==========================================
 
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true, trim: true, lowercase: true },
   password: { type: String, required: true },
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
+  lastSeen: { type: Date, default: null }
 });
 const User = mongoose.model('User', userSchema);
 
+const replySchema = new mongoose.Schema(
+  {
+    id: { type: String, index: true },
+    author: String,
+    text: String
+  },
+  { _id: false }
+);
+
+const reactionSchema = new mongoose.Schema(
+  {
+    emoji: String,
+    users: [String]
+  },
+  { _id: false }
+);
+
+// Повідомлення кімнат: 'general' або id групи
 const messageSchema = new mongoose.Schema({
+  room: { type: String, default: 'general', index: true },
   user: { type: String, required: true },
-  text: { type: String, required: true, maxlength: MAX_MSG_LENGTH },
+  text: { type: String, default: '', maxlength: MAX_MSG_LENGTH },
+  replyTo: { type: replySchema, default: undefined },
+  reactions: { type: [reactionSchema], default: [] },
+  editedAt: { type: Date, default: null },
+  deletedAt: { type: Date, default: null },
   createdAt: { type: Date, default: Date.now, index: true }
 });
+messageSchema.index({ room: 1, _id: -1 });
 const Message = mongoose.model('Message', messageSchema);
 
 const privateMessageSchema = new mongoose.Schema({
   sender: { type: String, required: true },
   recipient: { type: String, required: true },
-  text: { type: String, required: true, maxlength: MAX_MSG_LENGTH },
+  text: { type: String, default: '', maxlength: MAX_MSG_LENGTH },
+  replyTo: { type: replySchema, default: undefined },
+  reactions: { type: [reactionSchema], default: [] },
+  editedAt: { type: Date, default: null },
+  deletedAt: { type: Date, default: null },
   createdAt: { type: Date, default: Date.now }
 });
 privateMessageSchema.index({ sender: 1, recipient: 1, createdAt: 1 });
 privateMessageSchema.index({ recipient: 1, sender: 1, createdAt: 1 });
+privateMessageSchema.index({ sender: 1, recipient: 1, _id: -1 });
+privateMessageSchema.index({ recipient: 1, sender: 1, _id: -1 });
 const PrivateMessage = mongoose.model('PrivateMessage', privateMessageSchema);
+
+// Групові чати
+const groupSchema = new mongoose.Schema({
+  title: { type: String, required: true, trim: true, maxlength: MAX_GROUP_TITLE },
+  owner: { type: String, required: true },
+  members: { type: [String], default: [] },
+  createdAt: { type: Date, default: Date.now }
+});
+groupSchema.index({ members: 1 });
+const Group = mongoose.model('Group', groupSchema);
+
+// Мітки прочитаності: chat = 'general' | 'g:<groupId>' | <username співрозмовника>
+const readMarkerSchema = new mongoose.Schema({
+  user: { type: String, required: true },
+  chat: { type: String, required: true },
+  readAt: { type: Date, required: true }
+});
+readMarkerSchema.index({ user: 1, chat: 1 }, { unique: true });
+const ReadMarker = mongoose.model('ReadMarker', readMarkerSchema);
 
 // username -> Set з ID сокетів
 const onlineUsers = new Map();
 
-// --- Допоміжні функції ---
+// ==========================================
+// Допоміжні функції
+// ==========================================
 
 function issueToken(res, user, rememberMe) {
   const days = rememberMe ? 30 : 1;
@@ -137,6 +228,26 @@ function getTokenFromCookieHeader(header = '') {
   return null;
 }
 
+// Перевіряє токен і те, що користувач досі існує (і це саме той акаунт)
+async function authenticate(token) {
+  if (!token) return null;
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const user = await User.findById(decoded.userId, 'username createdAt').lean();
+    if (!user || user.username !== decoded.username) return null;
+    return user;
+  } catch {
+    return null;
+  }
+}
+
+const requireAuth = async (req, res, next) => {
+  const user = await authenticate(req.cookies.token);
+  if (!user) return res.status(401).json({ error: 'Не авторизовано' });
+  req.user = user;
+  next();
+};
+
 // Простий ліміт частоти: не більше `max` подій за `windowMs`
 function createRateLimiter(max, windowMs) {
   let stamps = [];
@@ -149,13 +260,223 @@ function createRateLimiter(max, windowMs) {
   };
 }
 
-// Остання N повідомлень у хронологічному порядку
-async function latestMessages(query, limit) {
-  const docs = await query.sort({ createdAt: -1 }).limit(limit).lean();
-  return docs.reverse();
+function validatePassword(password) {
+  if (typeof password !== 'string' || password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) {
+    return `Пароль повинен містити від ${PASSWORD_MIN} до ${PASSWORD_MAX} символів`;
+  }
+  return null;
 }
 
-// --- REST API ---
+function clampLimit(value) {
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n) || n < 1) return PAGE_SIZE;
+  return Math.min(n, PAGE_SIZE_MAX);
+}
+
+function serializeReactions(list) {
+  return (list || [])
+    .filter((r) => r.users && r.users.length > 0)
+    .map((r) => ({ emoji: r.emoji, users: Array.from(r.users) }));
+}
+
+function serializeReply(reply) {
+  if (!reply || !reply.id) return null;
+  return { id: reply.id, author: reply.author, text: reply.text || '' };
+}
+
+function serializeRoomMessage(m) {
+  const deleted = Boolean(m.deletedAt);
+  return {
+    id: String(m._id),
+    kind: 'room',
+    room: m.room || 'general',
+    author: m.user,
+    text: deleted ? '' : m.text,
+    createdAt: m.createdAt,
+    editedAt: m.editedAt || null,
+    deleted,
+    replyTo: serializeReply(m.replyTo),
+    reactions: deleted ? [] : serializeReactions(m.reactions)
+  };
+}
+
+function serializePrivateMessage(m) {
+  const deleted = Boolean(m.deletedAt);
+  return {
+    id: String(m._id),
+    kind: 'private',
+    author: m.sender,
+    recipient: m.recipient,
+    text: deleted ? '' : m.text,
+    createdAt: m.createdAt,
+    editedAt: m.editedAt || null,
+    deleted,
+    replyTo: serializeReply(m.replyTo),
+    reactions: deleted ? [] : serializeReactions(m.reactions)
+  };
+}
+
+function serializeGroup(g) {
+  return { id: String(g._id), title: g.title, owner: g.owner, members: Array.from(g.members) };
+}
+
+const roomChannel = (room) => (room === 'general' ? 'general' : `g:${room}`);
+
+function emitMessage(event, kind, doc) {
+  if (kind === 'private') {
+    io.to([doc.recipient, doc.sender]).emit(event, serializePrivateMessage(doc));
+  } else {
+    io.to(roomChannel(doc.room || 'general')).emit(event, serializeRoomMessage(doc));
+  }
+}
+
+// Остання сторінка повідомлень у хронологічному порядку (курсор — _id)
+async function fetchPage(Model, filter, before, limit) {
+  const query = { ...filter };
+  if (before) query._id = { $lt: before };
+  const docs = await Model.find(query)
+    .sort({ _id: -1 })
+    .limit(limit + 1)
+    .lean();
+  const hasMore = docs.length > limit;
+  if (hasMore) docs.pop();
+  docs.reverse();
+  return { docs, hasMore };
+}
+
+async function resolveMembers(rawList, exclude = []) {
+  if (!Array.isArray(rawList)) return [];
+  const names = [
+    ...new Set(
+      rawList
+        .filter((s) => typeof s === 'string')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean)
+    )
+  ]
+    .filter((n) => !exclude.includes(n))
+    .slice(0, MAX_GROUP_MEMBERS);
+  if (!names.length) return [];
+  const found = await User.find({ username: { $in: names } }, 'username').lean();
+  return found.map((u) => u.username);
+}
+
+async function setReadMarkers(usernames, chat) {
+  if (!usernames.length) return;
+  const readAt = new Date();
+  await ReadMarker.bulkWrite(
+    usernames.map((user) => ({
+      updateOne: { filter: { user, chat }, update: { $set: { readAt } }, upsert: true }
+    }))
+  );
+}
+
+async function deleteGroupData(group) {
+  const id = String(group._id);
+  await Message.deleteMany({ room: id });
+  await ReadMarker.deleteMany({ chat: `g:${id}` });
+  await Group.deleteOne({ _id: group._id });
+}
+
+// Кількість непрочитаних по всіх чатах
+async function computeUnread(user) {
+  const me = user.username;
+  const markers = await ReadMarker.find({ user: me }).lean();
+  const readAt = new Map(markers.map((m) => [m.chat, m.readAt]));
+  const result = { general: 0, groups: {}, peers: {} };
+  const tasks = [];
+
+  tasks.push(
+    Message.countDocuments({
+      room: 'general',
+      user: { $ne: me },
+      deletedAt: null,
+      createdAt: { $gt: readAt.get('general') || user.createdAt }
+    }).then((n) => {
+      result.general = n;
+    })
+  );
+
+  const groups = await Group.find({ members: me }, 'createdAt').lean();
+  for (const g of groups) {
+    const id = String(g._id);
+    tasks.push(
+      Message.countDocuments({
+        room: id,
+        user: { $ne: me },
+        deletedAt: null,
+        createdAt: { $gt: readAt.get(`g:${id}`) || g.createdAt }
+      }).then((n) => {
+        if (n) result.groups[id] = n;
+      })
+    );
+  }
+
+  const senders = await PrivateMessage.distinct('sender', { recipient: me });
+  for (const sender of senders) {
+    tasks.push(
+      PrivateMessage.countDocuments({
+        sender,
+        recipient: me,
+        deletedAt: null,
+        createdAt: { $gt: readAt.get(sender) || new Date(0) }
+      }).then((n) => {
+        if (n) result.peers[sender] = n;
+      })
+    );
+  }
+
+  await Promise.all(tasks);
+  return result;
+}
+
+// Повне видалення акаунта та пов'язаних даних
+async function deleteUserData(username) {
+  const now = new Date();
+
+  await PrivateMessage.deleteMany({ $or: [{ sender: username }, { recipient: username }] });
+
+  // Повідомлення в загальному чаті/групах: прибираємо вміст, але лишаємо «дірку» для контексту
+  await Message.updateMany(
+    { user: username, deletedAt: null },
+    { $set: { text: '', deletedAt: now, reactions: [] }, $unset: { replyTo: '' } }
+  );
+  // Цитати їхніх повідомлень в чужих відповідях теж очищаємо
+  await Message.updateMany({ 'replyTo.author': username }, { $set: { 'replyTo.text': '' } });
+  await Message.updateMany(
+    { 'reactions.users': username },
+    { $pull: { 'reactions.$[].users': username } }
+  );
+  await Message.updateMany(
+    { 'reactions.users': { $size: 0 } },
+    { $pull: { reactions: { users: { $size: 0 } } } }
+  );
+
+  await ReadMarker.deleteMany({ $or: [{ user: username }, { chat: username }] });
+
+  const groups = await Group.find({ members: username });
+  for (const group of groups) {
+    const id = String(group._id);
+    group.members = group.members.filter((m) => m !== username);
+    if (group.members.length === 0) {
+      io.to(`g:${id}`).emit('groupRemoved', { id });
+      await deleteGroupData(group);
+    } else {
+      if (group.owner === username) group.owner = group.members[0];
+      await group.save();
+      io.to(`g:${id}`).emit('groupUpdated', serializeGroup(group));
+    }
+  }
+
+  await User.deleteOne({ username });
+
+  io.emit('userRemoved', { username });
+  io.in(username).disconnectSockets(true);
+}
+
+// ==========================================
+// REST API: авторизація та профіль
+// ==========================================
 
 app.post('/api/register', async (req, res) => {
   try {
@@ -166,18 +487,13 @@ app.post('/api/register', async (req, res) => {
 
     const cleanUsername = username.trim().toLowerCase();
     if (!USERNAME_RE.test(cleanUsername)) {
-      return res.status(400).json({
-        error: 'Логін: 3–20 символів (літери, цифри, _ . -)'
-      });
+      return res.status(400).json({ error: 'Логін: 3–20 символів (літери, цифри, _ . -)' });
     }
     if (RESERVED_USERNAMES.has(cleanUsername)) {
       return res.status(400).json({ error: 'Цей логін зарезервовано' });
     }
-    if (password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) {
-      return res.status(400).json({
-        error: `Пароль повинен містити від ${PASSWORD_MIN} до ${PASSWORD_MAX} символів`
-      });
-    }
+    const passwordError = validatePassword(password);
+    if (passwordError) return res.status(400).json({ error: passwordError });
 
     if (await User.exists({ username: cleanUsername })) {
       return res.status(400).json({ error: 'Користувач вже існує' });
@@ -187,8 +503,6 @@ app.post('/api/register', async (req, res) => {
     const newUser = await User.create({ username: cleanUsername, password: hashedPassword });
 
     issueToken(res, newUser, Boolean(rememberMe));
-
-    // Повідомляємо всіх, щоб новий користувач одразу з'явився у списках
     io.emit('userRegistered', { username: newUser.username });
 
     res.status(201).json({ success: true, username: newUser.username });
@@ -222,16 +536,10 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-app.get('/api/me', (req, res) => {
-  const token = req.cookies.token;
-  if (!token) return res.status(401).json({ authenticated: false });
-
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    res.json({ authenticated: true, username: decoded.username });
-  } catch {
-    res.status(401).json({ authenticated: false });
-  }
+app.get('/api/me', async (req, res) => {
+  const user = await authenticate(req.cookies.token);
+  if (!user) return res.status(401).json({ authenticated: false });
+  res.json({ authenticated: true, username: user.username });
 });
 
 app.post('/api/logout', (req, res) => {
@@ -239,26 +547,67 @@ app.post('/api/logout', (req, res) => {
   res.json({ success: true });
 });
 
-const requireAuth = (req, res, next) => {
-  const token = req.cookies.token;
-  if (!token) return res.status(401).json({ error: 'Не авторизовано' });
+app.post('/api/change-password', requireAuth, async (req, res) => {
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    next();
-  } catch {
-    res.status(401).json({ error: 'Не авторизовано' });
+    const { oldPassword, newPassword } = req.body || {};
+    if (typeof oldPassword !== 'string' || typeof newPassword !== 'string' || !oldPassword) {
+      return res.status(400).json({ error: 'Заповніть усі поля' });
+    }
+    const passwordError = validatePassword(newPassword);
+    if (passwordError) return res.status(400).json({ error: passwordError });
+    if (oldPassword === newPassword) {
+      return res.status(400).json({ error: 'Новий пароль збігається зі старим' });
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user || !(await bcrypt.compare(oldPassword, user.password))) {
+      return res.status(400).json({ error: 'Невірний поточний пароль' });
+    }
+
+    user.password = await bcrypt.hash(newPassword, 10);
+    await user.save();
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Помилка зміни пароля:', err);
+    res.status(500).json({ error: 'Не вдалося змінити пароль' });
   }
-};
+});
+
+app.post('/api/delete-account', requireAuth, async (req, res) => {
+  try {
+    const { password } = req.body || {};
+    if (typeof password !== 'string' || !password) {
+      return res.status(400).json({ error: 'Введіть пароль' });
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(400).json({ error: 'Невірний пароль' });
+    }
+
+    await deleteUserData(user.username);
+    res.clearCookie('token');
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Помилка видалення акаунта:', err);
+    res.status(500).json({ error: 'Не вдалося видалити акаунт' });
+  }
+});
+
+// ==========================================
+// REST API: користувачі, історія, непрочитані
+// ==========================================
 
 app.get('/api/users', requireAuth, async (req, res) => {
   try {
-    const users = await User.find({ username: { $ne: req.user.username } }, 'username')
+    const users = await User.find({ username: { $ne: req.user.username } }, 'username lastSeen')
       .sort({ username: 1 })
       .lean();
     res.json(
       users.map((user) => ({
         username: user.username,
-        isOnline: onlineUsers.has(user.username)
+        isOnline: onlineUsers.has(user.username),
+        lastSeen: user.lastSeen || null
       }))
     );
   } catch (err) {
@@ -267,25 +616,189 @@ app.get('/api/users', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/messages/:targetUser', requireAuth, async (req, res) => {
+app.get('/api/unread', requireAuth, async (req, res) => {
   try {
-    const currentUser = req.user.username;
-    const targetUser = String(req.params.targetUser).trim().toLowerCase();
+    res.json(await computeUnread(req.user));
+  } catch (err) {
+    console.error('Помилка підрахунку непрочитаних:', err);
+    res.status(500).json({ error: 'Помилка завантаження' });
+  }
+});
 
-    const history = await latestMessages(
-      PrivateMessage.find({
-        $or: [
-          { sender: currentUser, recipient: targetUser },
-          { sender: targetUser, recipient: currentUser }
-        ]
-      }),
-      HISTORY_LIMIT_PRIVATE
-    );
+// Історія загального чату або групи (room = 'general' | id групи)
+app.get('/api/rooms/:room/messages', requireAuth, async (req, res) => {
+  try {
+    const room = String(req.params.room);
+    const before = req.query.before;
+    if (before !== undefined && !isId(before)) {
+      return res.status(400).json({ error: 'Некоректний курсор' });
+    }
 
-    res.json(history);
+    if (room !== 'general') {
+      if (!isId(room) || !(await Group.exists({ _id: room, members: req.user.username }))) {
+        return res.status(403).json({ error: 'Немає доступу до цієї групи' });
+      }
+    }
+
+    const { docs, hasMore } = await fetchPage(Message, { room }, before, clampLimit(req.query.limit));
+    res.json({ messages: docs.map(serializeRoomMessage), hasMore });
   } catch (err) {
     console.error('Помилка завантаження історії:', err);
     res.status(500).json({ error: 'Помилка завантаження історії' });
+  }
+});
+
+// Історія приватного чату
+app.get('/api/messages/:targetUser', requireAuth, async (req, res) => {
+  try {
+    const me = req.user.username;
+    const target = String(req.params.targetUser).trim().toLowerCase();
+    const before = req.query.before;
+    if (before !== undefined && !isId(before)) {
+      return res.status(400).json({ error: 'Некоректний курсор' });
+    }
+
+    const filter = {
+      $or: [
+        { sender: me, recipient: target },
+        { sender: target, recipient: me }
+      ]
+    };
+    const { docs, hasMore } = await fetchPage(PrivateMessage, filter, before, clampLimit(req.query.limit));
+
+    let peerRead = null;
+    if (!before) {
+      const marker = await ReadMarker.findOne({ user: target, chat: me }).lean();
+      peerRead = marker ? marker.readAt : null;
+    }
+
+    res.json({ messages: docs.map(serializePrivateMessage), hasMore, peerRead });
+  } catch (err) {
+    console.error('Помилка завантаження історії:', err);
+    res.status(500).json({ error: 'Помилка завантаження історії' });
+  }
+});
+
+// ==========================================
+// REST API: групи
+// ==========================================
+
+app.get('/api/groups', requireAuth, async (req, res) => {
+  try {
+    const groups = await Group.find({ members: req.user.username }).sort({ createdAt: 1 }).lean();
+    res.json(groups.map(serializeGroup));
+  } catch (err) {
+    console.error('Помилка завантаження груп:', err);
+    res.status(500).json({ error: 'Помилка завантаження груп' });
+  }
+});
+
+app.post('/api/groups', requireAuth, async (req, res) => {
+  try {
+    const me = req.user.username;
+    const body = req.body || {};
+    const title = typeof body.title === 'string' ? body.title.trim() : '';
+    if (!title || title.length > MAX_GROUP_TITLE) {
+      return res.status(400).json({ error: `Назва групи: 1–${MAX_GROUP_TITLE} символів` });
+    }
+
+    const others = await resolveMembers(body.members, [me]);
+    if (!others.length) {
+      return res.status(400).json({ error: 'Додайте хоча б одного учасника' });
+    }
+
+    const members = [me, ...others];
+    const group = await Group.create({ title, owner: me, members });
+    const id = String(group._id);
+
+    await setReadMarkers(members, `g:${id}`);
+    io.in(members).socketsJoin(`g:${id}`);
+    io.to(`g:${id}`).emit('groupUpdated', serializeGroup(group));
+
+    res.status(201).json(serializeGroup(group));
+  } catch (err) {
+    console.error('Помилка створення групи:', err);
+    res.status(500).json({ error: 'Не вдалося створити групу' });
+  }
+});
+
+app.post('/api/groups/:id/members', requireAuth, async (req, res) => {
+  try {
+    const me = req.user.username;
+    if (!isId(req.params.id)) return res.status(400).json({ error: 'Некоректна група' });
+
+    const group = await Group.findById(req.params.id);
+    if (!group || !group.members.includes(me)) return res.status(404).json({ error: 'Групу не знайдено' });
+    if (group.owner !== me) return res.status(403).json({ error: 'Лише власник може додавати учасників' });
+
+    const add = await resolveMembers((req.body || {}).members, Array.from(group.members));
+    if (!add.length) return res.status(400).json({ error: 'Немає кого додати' });
+    if (group.members.length + add.length > MAX_GROUP_MEMBERS) {
+      return res.status(400).json({ error: `Максимум ${MAX_GROUP_MEMBERS} учасників` });
+    }
+
+    group.members.push(...add);
+    await group.save();
+    const id = String(group._id);
+
+    await setReadMarkers(add, `g:${id}`);
+    io.in(add).socketsJoin(`g:${id}`);
+    io.to(`g:${id}`).emit('groupUpdated', serializeGroup(group));
+
+    res.json(serializeGroup(group));
+  } catch (err) {
+    console.error('Помилка додавання учасників:', err);
+    res.status(500).json({ error: 'Не вдалося додати учасників' });
+  }
+});
+
+app.post('/api/groups/:id/leave', requireAuth, async (req, res) => {
+  try {
+    const me = req.user.username;
+    if (!isId(req.params.id)) return res.status(400).json({ error: 'Некоректна група' });
+
+    const group = await Group.findOne({ _id: req.params.id, members: me });
+    if (!group) return res.status(404).json({ error: 'Групу не знайдено' });
+    const id = String(group._id);
+
+    group.members = group.members.filter((m) => m !== me);
+    io.in(me).socketsLeave(`g:${id}`);
+    await ReadMarker.deleteOne({ user: me, chat: `g:${id}` });
+
+    if (group.members.length === 0) {
+      await deleteGroupData(group);
+    } else {
+      if (group.owner === me) group.owner = group.members[0];
+      await group.save();
+      io.to(`g:${id}`).emit('groupUpdated', serializeGroup(group));
+    }
+
+    io.to(me).emit('groupRemoved', { id });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Помилка виходу з групи:', err);
+    res.status(500).json({ error: 'Не вдалося вийти з групи' });
+  }
+});
+
+app.delete('/api/groups/:id', requireAuth, async (req, res) => {
+  try {
+    const me = req.user.username;
+    if (!isId(req.params.id)) return res.status(400).json({ error: 'Некоректна група' });
+
+    const group = await Group.findById(req.params.id);
+    if (!group || !group.members.includes(me)) return res.status(404).json({ error: 'Групу не знайдено' });
+    if (group.owner !== me) return res.status(403).json({ error: 'Лише власник може видалити групу' });
+
+    const id = String(group._id);
+    io.to(`g:${id}`).emit('groupRemoved', { id });
+    await deleteGroupData(group);
+    io.in(`g:${id}`).socketsLeave(`g:${id}`);
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Помилка видалення групи:', err);
+    res.status(500).json({ error: 'Не вдалося видалити групу' });
   }
 });
 
@@ -298,121 +811,276 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Внутрішня помилка сервера' });
 });
 
-// --- Socket.IO ---
+// ==========================================
+// Socket.IO
+// ==========================================
 
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   try {
     const token = getTokenFromCookieHeader(socket.handshake.headers.cookie);
-    if (!token) return next(new Error('Auth error'));
-    socket.user = jwt.verify(token, JWT_SECRET);
+    const user = await authenticate(token);
+    if (!user) return next(new Error('Auth error'));
+    socket.user = { username: user.username };
     next();
   } catch {
     next(new Error('Auth error'));
   }
 });
 
-io.on('connection', async (socket) => {
+io.on('connection', (socket) => {
   const username = socket.user.username;
-  const canSend = createRateLimiter(10, 5000); // до 10 повідомлень за 5 секунд
+  const canSend = createRateLimiter(10, 5000); // нові повідомлення: до 10 за 5 с
+  const canAct = createRateLimiter(40, 10000); // редагування, реакції, позначки прочитаного
 
-  socket.join(username);
+  socket.join([username, 'general']);
 
-  if (!onlineUsers.has(username)) {
-    onlineUsers.set(username, new Set());
-  }
+  // Підписка на кімнати груп (обробники, що залежать від неї, чекають на `ready`)
+  const ready = (async () => {
+    try {
+      const groups = await Group.find({ members: username }, '_id').lean();
+      socket.join(groups.map((g) => `g:${g._id}`));
+    } catch (err) {
+      console.error('Помилка підписки на групи:', err);
+    }
+  })();
+
+  if (!onlineUsers.has(username)) onlineUsers.set(username, new Set());
   onlineUsers.get(username).add(socket.id);
   io.emit('onlineUsers', Array.from(onlineUsers.keys()));
 
-  try {
-    const history = await latestMessages(Message.find(), HISTORY_LIMIT_GENERAL);
-    socket.emit('chatHistory', history);
-  } catch (err) {
-    console.error('Помилка завантаження історії загального чату:', err);
+  // Створює знімок повідомлення, на яке відповідають
+  async function buildReply(Model, extraFilter, replyId) {
+    if (!isId(replyId)) return undefined;
+    const target = await Model.findOne({ _id: replyId, ...extraFilter }).lean();
+    if (!target) return undefined;
+    return {
+      id: String(target._id),
+      author: target.user || target.sender,
+      text: target.deletedAt ? '' : String(target.text).slice(0, REPLY_SNIPPET_LENGTH)
+    };
   }
 
+  const inRoom = (room) => room === 'general' || (isId(room) && socket.rooms.has(`g:${room}`));
+
+  // --- Нове повідомлення в загальний чат / групу ---
   socket.on('chatMessage', async (data) => {
     try {
+      await ready;
       if (!data || typeof data.text !== 'string') return;
+      const room = typeof data.room === 'string' ? data.room : 'general';
+      if (!inRoom(room)) return socket.emit('errorMessage', 'Ви не є учасником цієї групи');
+
       const text = data.text.trim();
       if (!text) return;
       if (text.length > MAX_MSG_LENGTH) {
         return socket.emit('errorMessage', `Повідомлення задовге (максимум ${MAX_MSG_LENGTH} символів)`);
       }
-      if (!canSend()) {
-        return socket.emit('errorMessage', 'Надто часто. Зачекайте кілька секунд.');
-      }
+      if (!canSend()) return socket.emit('errorMessage', 'Надто часто. Зачекайте кілька секунд.');
 
-      const newMessage = await Message.create({ user: username, text });
-      io.emit('chatMessage', { user: username, text, createdAt: newMessage.createdAt });
+      const replyTo = await buildReply(Message, { room }, data.replyTo);
+      const doc = await Message.create({ room, user: username, text, replyTo });
+      emitMessage('message', 'room', doc);
     } catch (err) {
-      console.error('Помилка збереження загального повідомлення:', err);
+      console.error('Помилка збереження повідомлення:', err);
     }
   });
 
+  // --- Приватне повідомлення ---
   socket.on('privateMessage', async (data) => {
     try {
       if (!data || typeof data.recipient !== 'string' || typeof data.text !== 'string') return;
 
-      const cleanText = data.text.trim();
-      const cleanRecipient = data.recipient.trim().toLowerCase();
-      if (!cleanText || !cleanRecipient) return;
-      if (cleanText.length > MAX_MSG_LENGTH) {
+      const text = data.text.trim();
+      const recipient = data.recipient.trim().toLowerCase();
+      if (!text || !recipient || recipient === username) return;
+      if (text.length > MAX_MSG_LENGTH) {
         return socket.emit('errorMessage', `Повідомлення задовге (максимум ${MAX_MSG_LENGTH} символів)`);
       }
-      if (!canSend()) {
-        return socket.emit('errorMessage', 'Надто часто. Зачекайте кілька секунд.');
-      }
-      if (!(await User.exists({ username: cleanRecipient }))) {
+      if (!canSend()) return socket.emit('errorMessage', 'Надто часто. Зачекайте кілька секунд.');
+      if (!(await User.exists({ username: recipient }))) {
         return socket.emit('errorMessage', 'Такого користувача не існує');
       }
 
-      const newMsg = await PrivateMessage.create({
-        sender: username,
-        recipient: cleanRecipient,
-        text: cleanText
-      });
-
-      const messageData = {
-        sender: username,
-        recipient: cleanRecipient,
-        text: cleanText,
-        createdAt: newMsg.createdAt
-      };
-
-      io.to(cleanRecipient).emit('privateMessage', messageData);
-      if (cleanRecipient !== username) {
-        io.to(username).emit('privateMessage', messageData);
-      }
+      const replyTo = await buildReply(
+        PrivateMessage,
+        {
+          $or: [
+            { sender: username, recipient },
+            { sender: recipient, recipient: username }
+          ]
+        },
+        data.replyTo
+      );
+      const doc = await PrivateMessage.create({ sender: username, recipient, text, replyTo });
+      emitMessage('message', 'private', doc);
     } catch (err) {
       console.error('Помилка приватного повідомлення:', err);
     }
   });
 
-  const relayTyping = (eventName) => (data) => {
-    const recipient =
-      data && typeof data.recipient === 'string' ? data.recipient.trim().toLowerCase() : '';
-    if (!recipient) return;
+  // --- Редагування власного повідомлення ---
+  socket.on('editMessage', async (data) => {
+    try {
+      await ready;
+      if (!data || !isId(data.id) || typeof data.text !== 'string') return;
+      const kind = data.kind === 'private' ? 'private' : 'room';
+      const text = data.text.trim();
+      if (!text) return;
+      if (text.length > MAX_MSG_LENGTH) {
+        return socket.emit('errorMessage', `Повідомлення задовге (максимум ${MAX_MSG_LENGTH} символів)`);
+      }
+      if (!canAct()) return socket.emit('errorMessage', 'Надто часто. Зачекайте кілька секунд.');
 
-    if (recipient === 'general') {
-      socket.broadcast.emit(eventName, { sender: username, recipient: 'general' });
-    } else if (recipient !== username) {
-      io.to(recipient).emit(eventName, { sender: username, recipient });
+      const Model = kind === 'private' ? PrivateMessage : Message;
+      const authorField = kind === 'private' ? 'sender' : 'user';
+      const existing = await Model.findOne({ _id: data.id, [authorField]: username, deletedAt: null }).lean();
+      if (!existing) return;
+      if (kind === 'room' && !inRoom(existing.room || 'general')) return;
+
+      const updated = await Model.findByIdAndUpdate(
+        data.id,
+        { $set: { text, editedAt: new Date() } },
+        { new: true }
+      );
+      if (updated) emitMessage('messageUpdated', kind, updated);
+    } catch (err) {
+      console.error('Помилка редагування:', err);
+    }
+  });
+
+  // --- Видалення власного повідомлення (м'яке) ---
+  socket.on('deleteMessage', async (data) => {
+    try {
+      await ready;
+      if (!data || !isId(data.id)) return;
+      const kind = data.kind === 'private' ? 'private' : 'room';
+      if (!canAct()) return socket.emit('errorMessage', 'Надто часто. Зачекайте кілька секунд.');
+
+      const Model = kind === 'private' ? PrivateMessage : Message;
+      const authorField = kind === 'private' ? 'sender' : 'user';
+      const existing = await Model.findOne({ _id: data.id, [authorField]: username, deletedAt: null }).lean();
+      if (!existing) return;
+      if (kind === 'room' && !inRoom(existing.room || 'general')) return;
+
+      const updated = await Model.findByIdAndUpdate(
+        data.id,
+        { $set: { text: '', deletedAt: new Date(), reactions: [] } },
+        { new: true }
+      );
+      // Прибираємо цитати видаленого повідомлення в інших відповідях
+      await Model.updateMany({ 'replyTo.id': String(data.id) }, { $set: { 'replyTo.text': '' } });
+      if (updated) emitMessage('messageUpdated', kind, updated);
+    } catch (err) {
+      console.error('Помилка видалення:', err);
+    }
+  });
+
+  // --- Реакція на повідомлення (повторне натискання знімає її) ---
+  socket.on('reactMessage', async (data) => {
+    try {
+      await ready;
+      if (!data || !isId(data.id) || !ALLOWED_REACTIONS.has(data.emoji)) return;
+      const kind = data.kind === 'private' ? 'private' : 'room';
+      if (!canAct()) return socket.emit('errorMessage', 'Надто часто. Зачекайте кілька секунд.');
+
+      const Model = kind === 'private' ? PrivateMessage : Message;
+      const msg = await Model.findOne({ _id: data.id, deletedAt: null }).lean();
+      if (!msg) return;
+      if (kind === 'private' && msg.sender !== username && msg.recipient !== username) return;
+      if (kind === 'room' && !inRoom(msg.room || 'general')) return;
+
+      const emoji = data.emoji;
+      const group = (msg.reactions || []).find((r) => r.emoji === emoji);
+      if (group && group.users.includes(username)) {
+        await Model.updateOne(
+          { _id: msg._id, 'reactions.emoji': emoji },
+          { $pull: { 'reactions.$.users': username } }
+        );
+        await Model.updateOne({ _id: msg._id }, { $pull: { reactions: { users: { $size: 0 } } } });
+      } else if (group) {
+        await Model.updateOne(
+          { _id: msg._id, 'reactions.emoji': emoji },
+          { $addToSet: { 'reactions.$.users': username } }
+        );
+      } else {
+        await Model.updateOne({ _id: msg._id }, { $push: { reactions: { emoji, users: [username] } } });
+      }
+
+      const updated = await Model.findById(msg._id);
+      if (updated) emitMessage('messageUpdated', kind, updated);
+    } catch (err) {
+      console.error('Помилка реакції:', err);
+    }
+  });
+
+  // --- Позначка «прочитано» ---
+  socket.on('markRead', async (data) => {
+    try {
+      await ready;
+      if (!data || typeof data.chat !== 'string' || !canAct()) return;
+      const raw = data.chat.trim();
+      const isGroup = raw.startsWith('g:');
+      const chat = raw === 'general' || isGroup ? raw : raw.toLowerCase();
+
+      if (isGroup) {
+        if (!socket.rooms.has(chat)) return;
+      } else if (chat !== 'general') {
+        if (chat === username || !(await User.exists({ username: chat }))) return;
+      }
+
+      const at = new Date();
+      await ReadMarker.updateOne({ user: username, chat }, { $set: { readAt: at } }, { upsert: true });
+
+      // Синхронізуємо інші вкладки/пристрої цього користувача
+      io.to(username).emit('unreadCleared', { chat });
+      // Співрозмовник бачить статус «прочитано»
+      if (!isGroup && chat !== 'general') {
+        io.to(chat).emit('peerRead', { peer: username, at });
+      }
+    } catch (err) {
+      console.error('Помилка позначки прочитаного:', err);
+    }
+  });
+
+  // --- Індикатори друкування ---
+  const relayTyping = (eventName) => (data) => {
+    const raw = data && typeof data.recipient === 'string' ? data.recipient.trim() : '';
+    if (!raw) return;
+
+    if (raw === 'general') {
+      socket.to('general').emit(eventName, { sender: username, recipient: 'general' });
+    } else if (raw.startsWith('g:')) {
+      if (socket.rooms.has(raw)) socket.to(raw).emit(eventName, { sender: username, recipient: raw });
+    } else {
+      const recipient = raw.toLowerCase();
+      if (recipient !== username) io.to(recipient).emit(eventName, { sender: username, recipient });
     }
   };
   socket.on('typing', relayTyping('typing'));
   socket.on('stopTyping', relayTyping('stopTyping'));
 
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     const userSockets = onlineUsers.get(username);
     if (userSockets) {
       userSockets.delete(socket.id);
-      if (userSockets.size === 0) onlineUsers.delete(username);
+      if (userSockets.size === 0) {
+        onlineUsers.delete(username);
+        const at = new Date();
+        try {
+          await User.updateOne({ username }, { $set: { lastSeen: at } });
+          io.emit('lastSeen', { username, at });
+        } catch (err) {
+          console.error('Помилка збереження lastSeen:', err);
+        }
+      }
     }
     io.emit('onlineUsers', Array.from(onlineUsers.keys()));
   });
 });
 
-// --- Запуск ---
+// ==========================================
+// Запуск
+// ==========================================
 
 const PORT = process.env.PORT || 3000;
 const MONGO_URI = process.env.MONGO_URI;
@@ -425,6 +1093,9 @@ async function start() {
 
     await mongoose.connect(MONGO_URI);
     console.log('Успішно підключено до MongoDB');
+
+    // Міграція: старі повідомлення без поля room належать загальному чату
+    await Message.updateMany({ room: { $exists: false } }, { $set: { room: 'general' } });
 
     server.listen(PORT, () => {
       console.log(`Сервер запущено на порту ${PORT}`);

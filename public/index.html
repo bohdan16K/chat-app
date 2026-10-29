@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
   <title>Real-Time Chat</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -40,17 +41,30 @@
   <div class="chat-app hidden" id="chatContainer">
     <aside class="sidebar">
       <div class="sidebar-header">
-        <span>Вітаємо, <strong id="userDisplay"></strong>!</span>
-        <button type="button" class="logout-btn" id="logoutBtn">Вийти</button>
+        <span class="me">Вітаємо, <strong id="userDisplay"></strong>!</span>
+        <span class="header-actions">
+          <button type="button" class="icon-btn" id="settingsBtn" title="Налаштування" aria-label="Налаштування">⚙️</button>
+          <button type="button" class="logout-btn" id="logoutBtn">Вийти</button>
+        </span>
+      </div>
+
+      <div class="search-box">
+        <input type="search" id="searchInput" placeholder="Пошук чатів і людей..." autocomplete="off" aria-label="Пошук">
       </div>
 
       <div class="users-section">
         <h4>Чати</h4>
         <div class="user-item active" id="generalChatBtn" role="button" tabindex="0">
-          <span class="status-dot online"></span>
-          <span>📢 Загальний чат</span>
+          <span class="item-icon">📢</span>
+          <div class="item-main"><div class="item-name">Загальний чат</div></div>
           <span class="unread-badge hidden" id="badge-general">0</span>
         </div>
+
+        <div class="section-row">
+          <h4>Групи</h4>
+          <button type="button" class="mini-btn" id="newGroupBtn" title="Створити групу" aria-label="Створити групу">+</button>
+        </div>
+        <div id="groupsList"></div>
 
         <h4>Користувачі</h4>
         <div id="usersList" class="users-list"></div>
@@ -60,13 +74,28 @@
     <main class="chat-window">
       <header class="chat-header">
         <button type="button" class="back-btn" id="backBtn">← Чати</button>
-        <h3 id="chatTitle">📢 Загальний чат</h3>
+        <div class="chat-title-wrap">
+          <h3 id="chatTitle">📢 Загальний чат</h3>
+          <div class="chat-subtitle" id="chatSubtitle"></div>
+        </div>
+        <button type="button" class="icon-btn hidden" id="chatInfoBtn" title="Про групу" aria-label="Про групу">ℹ️</button>
       </header>
 
       <div class="chat-messages" id="messages"></div>
       <div id="typingIndicator" class="typing-indicator hidden"></div>
 
+      <div class="composer-bar hidden" id="composerBar">
+        <div class="composer-bar-text">
+          <strong id="composerBarTitle"></strong>
+          <span id="composerBarText"></span>
+        </div>
+        <button type="button" class="icon-btn" id="composerCancel" title="Скасувати" aria-label="Скасувати">✕</button>
+      </div>
+
+      <div class="emoji-panel hidden" id="emojiPanel"></div>
+
       <form class="chat-form" id="chatForm">
+        <button type="button" class="emoji-toggle" id="emojiBtn" title="Емодзі" aria-label="Емодзі">😊</button>
         <input type="text" id="messageInput" placeholder="Введіть повідомлення..." maxlength="2000" required autocomplete="off">
         <button type="submit">Надіслати</button>
       </form>
@@ -75,10 +104,95 @@
 
 </div>
 
+<!-- Створення групи -->
+<dialog id="groupDialog" class="modal">
+  <form id="groupForm" class="modal-body">
+    <h3>Нова група</h3>
+    <label class="field">Назва
+      <input type="text" id="groupTitleInput" maxlength="40" placeholder="Наприклад, Друзі" autocomplete="off" required>
+    </label>
+    <div class="modal-label">Учасники</div>
+    <div id="groupMembersPick" class="pick-list"></div>
+    <p class="form-error hidden" id="groupError" role="alert"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secondary" data-close>Скасувати</button>
+      <button type="submit" class="btn">Створити</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Інформація про групу -->
+<dialog id="groupInfoDialog" class="modal">
+  <div class="modal-body">
+    <h3 id="groupInfoTitle"></h3>
+    <div class="modal-label">Учасники</div>
+    <ul id="groupInfoMembers" class="member-list"></ul>
+
+    <div id="groupAddSection" class="hidden">
+      <div class="modal-label">Додати учасників</div>
+      <div id="groupAddPick" class="pick-list"></div>
+      <button type="button" class="btn" id="groupAddBtn">Додати</button>
+    </div>
+
+    <p class="form-error hidden" id="groupInfoError" role="alert"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-danger" id="groupLeaveBtn">Вийти з групи</button>
+      <button type="button" class="btn btn-danger hidden" id="groupDeleteBtn">Видалити групу</button>
+      <button type="button" class="btn btn-secondary" data-close>Закрити</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- Налаштування -->
+<dialog id="settingsDialog" class="modal">
+  <div class="modal-body">
+    <h3>Налаштування</h3>
+
+    <label class="field">Тема
+      <select id="themeSelect">
+        <option value="system">Як у системі</option>
+        <option value="light">Світла</option>
+        <option value="dark">Темна</option>
+      </select>
+    </label>
+
+    <label class="checkbox-group"><input type="checkbox" id="soundToggle"> Звук нових повідомлень</label>
+    <label class="checkbox-group"><input type="checkbox" id="notifyToggle"> Сповіщення браузера</label>
+    <p class="hint hidden" id="notifyHint"></p>
+
+    <hr>
+
+    <form id="passwordForm" class="sub-form">
+      <h4>Змінити пароль</h4>
+      <input type="password" id="oldPassword" placeholder="Поточний пароль" autocomplete="current-password" maxlength="72" required>
+      <input type="password" id="newPassword" placeholder="Новий пароль (від 6 символів)" autocomplete="new-password" maxlength="72" required>
+      <p class="form-msg hidden" id="passwordMsg" role="alert"></p>
+      <button type="submit" class="btn">Змінити пароль</button>
+    </form>
+
+    <hr>
+
+    <form id="deleteForm" class="sub-form">
+      <h4 class="danger-title">Видалити акаунт</h4>
+      <p class="hint">Приватні листування буде видалено безповоротно, а ваші повідомлення в загальних чатах стануть «видаленими».</p>
+      <input type="password" id="deletePassword" placeholder="Ваш пароль" autocomplete="current-password" maxlength="72" required>
+      <p class="form-msg hidden" id="deleteMsg" role="alert"></p>
+      <button type="submit" class="btn btn-danger">Видалити акаунт</button>
+    </form>
+
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secondary" data-close>Закрити</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- Меню повідомлення -->
+<div class="msg-menu hidden" id="msgMenu" role="menu"></div>
+
 <div class="toast hidden" id="toast" role="status"></div>
 
 <script src="/socket.io/socket.io.js"></script>
-<script src="App.js"></script>
+<script src="app.js"></script>
 
 </body>
 </html>
