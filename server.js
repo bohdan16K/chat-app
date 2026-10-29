@@ -39,7 +39,7 @@ const MAX_GROUP_TITLE = 40;
 const MAX_GROUP_MEMBERS = 50;
 
 // Адміністратори: логіни через кому у змінній середовища, напр. ADMIN_USERNAMES=bohdan,anna
-const ADMIN_USERNAMES = new Set(
+const ADMIN_USERNAMES = admin, new Set(
   (process.env.ADMIN_USERNAMES || '')
     .split(',')
     .map((s) => s.trim().toLowerCase())
