@@ -37,6 +37,17 @@ const PASSWORD_MAX = 72; // обмеження bcrypt
 const RESERVED_USERNAMES = new Set(['general']); // службовий ідентифікатор загального чату
 const MAX_GROUP_TITLE = 40;
 const MAX_GROUP_MEMBERS = 50;
+
+// Адміністратори: логіни через кому у змінній середовища, напр. ADMIN_USERNAMES=bohdan,anna
+const ADMIN_USERNAMES = new Set(
+  (process.env.ADMIN_USERNAMES || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean)
+);
+const isAdminName = (name) => typeof name === 'string' && ADMIN_USERNAMES.has(name.toLowerCase());
+const MUTE_FOREVER = new Date('9999-12-31T00:00:00.000Z');
+const MUTE_MAX_MINUTES = 60 * 24 * 365; // не більше року (далі — «назавжди»)
 // Дозволені реакції (мають збігатися з клієнтом)
 const ALLOWED_REACTIONS = new Set([
   '👍', // 👍
@@ -48,6 +59,13 @@ const ALLOWED_REACTIONS = new Set([
 ]);
 
 const isId = (value) => typeof value === 'string' && /^[a-f\d]{24}$/i.test(value);
+
+// Пошук без урахування регістру: у базі можуть лишатися логіни зі старих версій з великими літерами
+const CI = { locale: 'en', strength: 2 };
+const findUserCI = (name) =>
+  typeof name === 'string' && name.trim()
+    ? User.findOne({ username: name.trim() }).collation(CI)
+    : Promise.resolve(null);
 
 const app = express();
 if (IS_PROD) app.set('trust proxy', 1); // за reverse proxy (Render, Railway тощо)
@@ -130,7 +148,8 @@ const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true, trim: true, lowercase: true },
   password: { type: String, required: true },
   createdAt: { type: Date, default: Date.now },
-  lastSeen: { type: Date, default: null }
+  lastSeen: { type: Date, default: null },
+  mutedUntil: { type: Date, default: null } // мут: до якого моменту не можна писати
 });
 const User = mongoose.model('User', userSchema);
 
@@ -248,6 +267,26 @@ const requireAuth = async (req, res, next) => {
   next();
 };
 
+// Активні муті в пам'яті (username -> Date), щоб не ходити в базу на кожне повідомлення
+const mutedUntilMap = new Map();
+
+function activeMute(username) {
+  const until = mutedUntilMap.get(username);
+  if (!until) return null;
+  if (until.getTime() <= Date.now()) {
+    mutedUntilMap.delete(username);
+    return null;
+  }
+  return until;
+}
+
+const requireAdmin = (req, res, next) => {
+  if (!isAdminName(req.user.username)) {
+    return res.status(403).json({ error: 'Лише для адміністраторів' });
+  }
+  next();
+};
+
 // Простий ліміт частоти: не більше `max` подій за `windowMs`
 function createRateLimiter(max, windowMs) {
   let stamps = [];
@@ -346,6 +385,7 @@ async function fetchPage(Model, filter, before, limit) {
 
 async function resolveMembers(rawList, exclude = []) {
   if (!Array.isArray(rawList)) return [];
+  const excluded = exclude.map((e) => String(e).toLowerCase());
   const names = [
     ...new Set(
       rawList
@@ -354,11 +394,11 @@ async function resolveMembers(rawList, exclude = []) {
         .filter(Boolean)
     )
   ]
-    .filter((n) => !exclude.includes(n))
+    .filter((n) => !excluded.includes(n))
     .slice(0, MAX_GROUP_MEMBERS);
   if (!names.length) return [];
-  const found = await User.find({ username: { $in: names } }, 'username').lean();
-  return found.map((u) => u.username);
+  const found = await User.find({ username: { $in: names } }, 'username').collation(CI).lean();
+  return found.map((u) => u.username).filter((n) => !excluded.includes(n.toLowerCase()));
 }
 
 async function setReadMarkers(usernames, chat) {
@@ -495,7 +535,7 @@ app.post('/api/register', async (req, res) => {
     const passwordError = validatePassword(password);
     if (passwordError) return res.status(400).json({ error: passwordError });
 
-    if (await User.exists({ username: cleanUsername })) {
+    if (await findUserCI(cleanUsername)) {
       return res.status(400).json({ error: 'Користувач вже існує' });
     }
 
@@ -505,7 +545,7 @@ app.post('/api/register', async (req, res) => {
     issueToken(res, newUser, Boolean(rememberMe));
     io.emit('userRegistered', { username: newUser.username });
 
-    res.status(201).json({ success: true, username: newUser.username });
+    res.status(201).json({ success: true, username: newUser.username, isAdmin: isAdminName(newUser.username) });
   } catch (err) {
     if (err && err.code === 11000) {
       return res.status(400).json({ error: 'Користувач вже існує' });
@@ -522,14 +562,14 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ error: 'Заповніть усі поля' });
     }
 
-    const user = await User.findOne({ username: username.trim().toLowerCase() });
+    const user = await findUserCI(username);
     const isMatch = user ? await bcrypt.compare(password, user.password) : false;
     if (!isMatch) {
       return res.status(400).json({ error: 'Невірні дані для входу' });
     }
 
     issueToken(res, user, Boolean(rememberMe));
-    res.json({ success: true, username: user.username });
+    res.json({ success: true, username: user.username, isAdmin: isAdminName(user.username) });
   } catch (err) {
     console.error('Помилка авторизації:', err);
     res.status(500).json({ error: 'Помилка авторизації' });
@@ -539,7 +579,7 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/me', async (req, res) => {
   const user = await authenticate(req.cookies.token);
   if (!user) return res.status(401).json({ authenticated: false });
-  res.json({ authenticated: true, username: user.username });
+  res.json({ authenticated: true, username: user.username, isAdmin: isAdminName(user.username) });
 });
 
 app.post('/api/logout', (req, res) => {
@@ -600,15 +640,25 @@ app.post('/api/delete-account', requireAuth, async (req, res) => {
 
 app.get('/api/users', requireAuth, async (req, res) => {
   try {
-    const users = await User.find({ username: { $ne: req.user.username } }, 'username lastSeen')
+    const viewerIsAdmin = isAdminName(req.user.username);
+    const users = await User.find({ username: { $ne: req.user.username } }, 'username lastSeen mutedUntil')
       .sort({ username: 1 })
       .lean();
+    const now = Date.now();
     res.json(
-      users.map((user) => ({
-        username: user.username,
-        isOnline: onlineUsers.has(user.username),
-        lastSeen: user.lastSeen || null
-      }))
+      users.map((user) => {
+        const item = {
+          username: user.username,
+          isOnline: onlineUsers.has(user.username),
+          lastSeen: user.lastSeen || null
+        };
+        // Статус муту та ознаку адміна бачать лише адміністратори
+        if (viewerIsAdmin) {
+          item.isAdmin = isAdminName(user.username);
+          item.mutedUntil = user.mutedUntil && user.mutedUntil.getTime() > now ? user.mutedUntil : null;
+        }
+        return item;
+      })
     );
   } catch (err) {
     console.error('Помилка завантаження користувачів:', err);
@@ -652,7 +702,8 @@ app.get('/api/rooms/:room/messages', requireAuth, async (req, res) => {
 app.get('/api/messages/:targetUser', requireAuth, async (req, res) => {
   try {
     const me = req.user.username;
-    const target = String(req.params.targetUser).trim().toLowerCase();
+    const targetUser = await findUserCI(req.params.targetUser);
+    const target = targetUser ? targetUser.username : String(req.params.targetUser).trim();
     const before = req.query.before;
     if (before !== undefined && !isId(before)) {
       return res.status(400).json({ error: 'Некоректний курсор' });
@@ -802,6 +853,82 @@ app.delete('/api/groups/:id', requireAuth, async (req, res) => {
   }
 });
 
+// ==========================================
+// REST API: адміністрування
+// ==========================================
+
+// Мут користувача: { username, minutes } або { username, forever: true }
+app.post('/api/admin/mute', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { username, minutes, forever } = req.body || {};
+    const target = await findUserCI(username);
+    if (!target) return res.status(404).json({ error: 'Користувача не знайдено' });
+    if (isAdminName(target.username)) {
+      return res.status(400).json({ error: 'Адміністратора не можна замутити' });
+    }
+
+    let until;
+    if (forever === true) {
+      until = MUTE_FOREVER;
+    } else {
+      const m = Number(minutes);
+      if (!Number.isFinite(m) || m < 1 || m > MUTE_MAX_MINUTES) {
+        return res.status(400).json({ error: 'Некоректна тривалість муту' });
+      }
+      until = new Date(Date.now() + m * 60000);
+    }
+
+    await User.updateOne({ _id: target._id }, { $set: { mutedUntil: until } });
+    mutedUntilMap.set(target.username, until);
+
+    io.to(target.username).emit('muteState', { mutedUntil: until });
+    io.to('admins').emit('muteUpdated', { username: target.username, mutedUntil: until });
+
+    res.json({ success: true, username: target.username, mutedUntil: until });
+  } catch (err) {
+    console.error('Помилка муту:', err);
+    res.status(500).json({ error: 'Не вдалося замутити користувача' });
+  }
+});
+
+app.post('/api/admin/unmute', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const target = await findUserCI((req.body || {}).username);
+    if (!target) return res.status(404).json({ error: 'Користувача не знайдено' });
+
+    await User.updateOne({ _id: target._id }, { $set: { mutedUntil: null } });
+    mutedUntilMap.delete(target.username);
+
+    io.to(target.username).emit('muteState', { mutedUntil: null });
+    io.to('admins').emit('muteUpdated', { username: target.username, mutedUntil: null });
+
+    res.json({ success: true, username: target.username, mutedUntil: null });
+  } catch (err) {
+    console.error('Помилка зняття муту:', err);
+    res.status(500).json({ error: 'Не вдалося зняти мут' });
+  }
+});
+
+// Видалення користувача: приватні листування стираються, повідомлення в чатах стають «видаленими»
+app.post('/api/admin/delete-user', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const target = await findUserCI((req.body || {}).username);
+    if (!target) return res.status(404).json({ error: 'Користувача не знайдено' });
+    if (isAdminName(target.username)) {
+      return res.status(400).json({ error: 'Адміністратора не можна видалити' });
+    }
+
+    mutedUntilMap.delete(target.username);
+    await deleteUserData(target.username);
+    console.log(`Адміністратор ${req.user.username} видалив користувача ${target.username}`);
+
+    res.json({ success: true, username: target.username });
+  } catch (err) {
+    console.error('Помилка видалення користувача:', err);
+    res.status(500).json({ error: 'Не вдалося видалити користувача' });
+  }
+});
+
 // Обробник помилок (наприклад, некоректний JSON)
 app.use((err, req, res, next) => {
   if (err && err.type === 'entity.parse.failed') {
@@ -832,7 +959,16 @@ io.on('connection', (socket) => {
   const canSend = createRateLimiter(10, 5000); // нові повідомлення: до 10 за 5 с
   const canAct = createRateLimiter(40, 10000); // редагування, реакції, позначки прочитаного
 
+  // Замученим не можна ні писати, ні редагувати, ні ставити реакції
+  const blockedByMute = () => {
+    if (!activeMute(username)) return false;
+    socket.emit('errorMessage', 'Вас вимкнено (мут): надсилати повідомлення не можна');
+    return true;
+  };
+
   socket.join([username, 'general']);
+  if (isAdminName(username)) socket.join('admins');
+  socket.emit('muteState', { mutedUntil: activeMute(username) });
 
   // Підписка на кімнати груп (обробники, що залежать від неї, чекають на `ready`)
   const ready = (async () => {
@@ -865,6 +1001,7 @@ io.on('connection', (socket) => {
   // --- Нове повідомлення в загальний чат / групу ---
   socket.on('chatMessage', async (data) => {
     try {
+      if (blockedByMute()) return;
       await ready;
       if (!data || typeof data.text !== 'string') return;
       const room = typeof data.room === 'string' ? data.room : 'general';
@@ -888,18 +1025,22 @@ io.on('connection', (socket) => {
   // --- Приватне повідомлення ---
   socket.on('privateMessage', async (data) => {
     try {
+      if (blockedByMute()) return;
       if (!data || typeof data.recipient !== 'string' || typeof data.text !== 'string') return;
 
       const text = data.text.trim();
-      const recipient = data.recipient.trim().toLowerCase();
-      if (!text || !recipient || recipient === username) return;
+      const rawRecipient = data.recipient.trim();
+      if (!text || !rawRecipient) return;
       if (text.length > MAX_MSG_LENGTH) {
         return socket.emit('errorMessage', `Повідомлення задовге (максимум ${MAX_MSG_LENGTH} символів)`);
       }
       if (!canSend()) return socket.emit('errorMessage', 'Надто часто. Зачекайте кілька секунд.');
-      if (!(await User.exists({ username: recipient }))) {
+      const recipientUser = await findUserCI(rawRecipient);
+      if (!recipientUser) {
         return socket.emit('errorMessage', 'Такого користувача не існує');
       }
+      const recipient = recipientUser.username;
+      if (recipient === username) return;
 
       const replyTo = await buildReply(
         PrivateMessage,
@@ -921,6 +1062,7 @@ io.on('connection', (socket) => {
   // --- Редагування власного повідомлення ---
   socket.on('editMessage', async (data) => {
     try {
+      if (blockedByMute()) return;
       await ready;
       if (!data || !isId(data.id) || typeof data.text !== 'string') return;
       const kind = data.kind === 'private' ? 'private' : 'room';
@@ -978,6 +1120,7 @@ io.on('connection', (socket) => {
   // --- Реакція на повідомлення (повторне натискання знімає її) ---
   socket.on('reactMessage', async (data) => {
     try {
+      if (blockedByMute()) return;
       await ready;
       if (!data || !isId(data.id) || !ALLOWED_REACTIONS.has(data.emoji)) return;
       const kind = data.kind === 'private' ? 'private' : 'room';
@@ -1020,12 +1163,14 @@ io.on('connection', (socket) => {
       if (!data || typeof data.chat !== 'string' || !canAct()) return;
       const raw = data.chat.trim();
       const isGroup = raw.startsWith('g:');
-      const chat = raw === 'general' || isGroup ? raw : raw.toLowerCase();
+      let chat = raw;
 
       if (isGroup) {
         if (!socket.rooms.has(chat)) return;
       } else if (chat !== 'general') {
-        if (chat === username || !(await User.exists({ username: chat }))) return;
+        const peer = await findUserCI(raw);
+        if (!peer || peer.username === username) return;
+        chat = peer.username;
       }
 
       const at = new Date();
@@ -1052,7 +1197,7 @@ io.on('connection', (socket) => {
     } else if (raw.startsWith('g:')) {
       if (socket.rooms.has(raw)) socket.to(raw).emit(eventName, { sender: username, recipient: raw });
     } else {
-      const recipient = raw.toLowerCase();
+      const recipient = raw;
       if (recipient !== username) io.to(recipient).emit(eventName, { sender: username, recipient });
     }
   };
@@ -1096,6 +1241,16 @@ async function start() {
 
     // Міграція: старі повідомлення без поля room належать загальному чату
     await Message.updateMany({ room: { $exists: false } }, { $set: { room: 'general' } });
+
+    // Відновлюємо активні муті після перезапуску сервера
+    const muted = await User.find({ mutedUntil: { $gt: new Date() } }, 'username mutedUntil').lean();
+    muted.forEach((u) => mutedUntilMap.set(u.username, u.mutedUntil));
+
+    if (ADMIN_USERNAMES.size) {
+      console.log(`Адміністратори: ${[...ADMIN_USERNAMES].join(', ')}`);
+    } else {
+      console.warn('ADMIN_USERNAMES не задано: адміністраторів немає.');
+    }
 
     server.listen(PORT, () => {
       console.log(`Сервер запущено на порту ${PORT}`);

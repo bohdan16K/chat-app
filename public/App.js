@@ -74,6 +74,9 @@
   let markTimer = null;
   let infoGroupId = null;
   let audioCtx = null;
+  let isAdmin = false;
+  let myMutedUntil = null; // Date | null
+  let muteTimer = null;
 
   const typingMap = new Map(); // "chat|sender" -> { chat, sender, timer }
 
@@ -90,6 +93,7 @@
   const registerBtn = $('registerBtn');
   const logoutBtn = $('logoutBtn');
   const settingsBtn = $('settingsBtn');
+  const adminBtn = $('adminBtn');
   const chatContainer = $('chatContainer');
   const userDisplay = $('userDisplay');
   const searchInput = $('searchInput');
@@ -143,6 +147,12 @@
   const deleteForm = $('deleteForm');
   const deletePassword = $('deletePassword');
   const deleteMsg = $('deleteMsg');
+
+  const adminDialog = $('adminDialog');
+  const muteDuration = $('muteDuration');
+  const adminSearch = $('adminSearch');
+  const adminUsers = $('adminUsers');
+  const adminMsg = $('adminMsg');
 
   // ==========================================
   // Утиліти
@@ -328,7 +338,7 @@
       });
       if (ok && data.success) {
         authPassword.value = '';
-        startChatSession(data.username);
+        startChatSession(data.username, data.isAdmin);
       } else {
         showAuthError(data.error || 'Сталася помилка');
       }
@@ -429,7 +439,7 @@
         key: `u:${u.username}`,
         online,
         label: u.username,
-        sub: online ? 'в мережі' : formatLastSeen(u.lastSeen),
+        sub: (isAdmin && isMutedUser(u) ? '🔇 мут · ' : '') + (online ? 'в мережі' : formatLastSeen(u.lastSeen)),
         count: unread[`u:${u.username}`] || 0
       });
     });
@@ -476,15 +486,21 @@
   // ==========================================
   function ensureUser(name) {
     if (!name || name === currentUser || users.some((u) => u.username === name)) return;
-    users.push({ username: name, lastSeen: null });
+    users.push({ username: name, lastSeen: null, mutedUntil: null, isAdmin: false });
     renderSidebar();
+    if (adminDialog.open) renderAdminList();
   }
 
   async function loadUsers() {
     try {
       const { ok, data } = await api('/api/users');
       if (!ok) return;
-      users = data.map((u) => ({ username: u.username, lastSeen: u.lastSeen }));
+      users = data.map((u) => ({
+        username: u.username,
+        lastSeen: u.lastSeen,
+        mutedUntil: u.mutedUntil || null, // приходить лише адміністраторам
+        isAdmin: Boolean(u.isAdmin)
+      }));
     } catch (err) {
       console.error('Помилка завантаження користувачів:', err);
     }
@@ -1089,6 +1105,10 @@
   chatForm.addEventListener('submit', (e) => {
     e.preventDefault();
     if (!socket) return;
+    if (isMuted()) {
+      showToast('Вас вимкнено (мут): надсилати повідомлення не можна');
+      return;
+    }
 
     const text = messageInput.value.trim();
     if (!text) return;
@@ -1131,7 +1151,7 @@
     }
   });
 
-  [groupDialog, groupInfoDialog, settingsDialog].forEach((dialog) => {
+  [groupDialog, groupInfoDialog, settingsDialog, adminDialog].forEach((dialog) => {
     dialog.addEventListener('click', (e) => {
       if (e.target === dialog) dialog.close(); // клік по затемненню
     });
@@ -1369,6 +1389,166 @@
   });
 
   // ==========================================
+  // Мут та адміністрування
+  // ==========================================
+  const FOREVER_YEAR = 9000;
+
+  function formatUntil(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    if (date.getFullYear() >= FOREVER_YEAR) return 'назавжди';
+    if (date.toDateString() === new Date().toDateString()) return `до ${formatTime(date)}`;
+    return `до ${date.toLocaleDateString('uk-UA', { day: 'numeric', month: 'short' })}, ${formatTime(date)}`;
+  }
+
+  const isMutedUser = (u) => Boolean(u.mutedUntil) && new Date(u.mutedUntil) > new Date();
+  const isMuted = () => Boolean(myMutedUntil) && myMutedUntil > new Date();
+
+  // Блокує або розблоковує поле вводу для замученого користувача
+  function applyMuteState(value) {
+    clearTimeout(muteTimer);
+    const wasMuted = isMuted();
+    myMutedUntil = value ? new Date(value) : null;
+    const muted = isMuted();
+
+    messageInput.disabled = muted;
+    emojiBtn.disabled = muted;
+    messageInput.placeholder = muted
+      ? `Вас вимкнено (мут) ${formatUntil(myMutedUntil)}`
+      : 'Введіть повідомлення...';
+
+    if (muted) {
+      cancelComposer();
+      emojiPanel.classList.add('hidden');
+      if (!wasMuted) showToast(`Адміністратор вимкнув вам можливість писати (${formatUntil(myMutedUntil)})`);
+      const ms = myMutedUntil.getTime() - Date.now();
+      if (ms < 2147483000) muteTimer = setTimeout(() => applyMuteState(myMutedUntil), ms + 500);
+    } else if (wasMuted) {
+      showToast('Мут знято, ви знову можете писати');
+    }
+  }
+
+  function setUserMute(name, until) {
+    const user = users.find((u) => u.username === name);
+    if (user) user.mutedUntil = until || null;
+    renderSidebar();
+    if (adminDialog.open) renderAdminList();
+  }
+
+  function removeUser(name) {
+    users = users.filter((u) => u.username !== name);
+    chats.delete(`u:${name}`);
+    delete unread[`u:${name}`];
+    if (adminDialog.open) renderAdminList();
+
+    if (activeChat === `u:${name}`) {
+      showToast(`Користувача ${name} видалено`);
+      switchChat('general', { keepMobileList: true });
+    } else {
+      renderSidebar();
+      updateDocumentTitle();
+    }
+  }
+
+  function makeAdminRow(u) {
+    const row = h('div', 'admin-row');
+    const online = onlineSet.has(u.username);
+    const muted = isMutedUser(u);
+
+    const info = h('div', 'admin-info');
+    info.appendChild(h('div', 'admin-name', u.isAdmin ? `${u.username} 👑` : u.username));
+    let sub = online ? '🟢 в мережі' : formatLastSeen(u.lastSeen);
+    if (muted) sub += ` · 🔇 мут ${formatUntil(u.mutedUntil)}`;
+    info.appendChild(h('div', 'admin-sub', sub));
+    row.appendChild(info);
+
+    if (!u.isAdmin) {
+      const actions = h('div', 'admin-actions');
+
+      const muteBtn = h('button', 'btn btn-small btn-secondary', muted ? '🔊 Зняти мут' : '🔇 Мут');
+      muteBtn.type = 'button';
+      muteBtn.addEventListener('click', () => (muted ? adminUnmute(u.username) : adminMute(u.username)));
+
+      const deleteBtn = h('button', 'btn btn-small btn-danger', '🗑');
+      deleteBtn.type = 'button';
+      deleteBtn.title = 'Видалити користувача';
+      deleteBtn.setAttribute('aria-label', `Видалити користувача ${u.username}`);
+      deleteBtn.addEventListener('click', () => adminDelete(u.username));
+
+      actions.append(muteBtn, deleteBtn);
+      row.appendChild(actions);
+    }
+    return row;
+  }
+
+  function renderAdminList() {
+    const query = adminSearch.value.trim().toLowerCase();
+    const list = users
+      .filter((u) => !query || u.username.toLowerCase().includes(query))
+      .sort(
+        (a, b) =>
+          Number(onlineSet.has(b.username)) - Number(onlineSet.has(a.username)) ||
+          a.username.localeCompare(b.username, 'uk')
+      );
+
+    if (!list.length) {
+      adminUsers.replaceChildren(h('div', 'pick-note', users.length ? 'Нікого не знайдено' : 'Користувачів немає'));
+      return;
+    }
+    adminUsers.replaceChildren(...list.map(makeAdminRow));
+  }
+
+  async function adminAction(url, body, okText) {
+    setMsg(adminMsg, '');
+    try {
+      const { ok, data } = await api(url, { method: 'POST', body: JSON.stringify(body) });
+      if (!ok) {
+        setMsg(adminMsg, data.error || 'Не вдалося виконати дію');
+        return null;
+      }
+      setMsg(adminMsg, okText, true);
+      return data;
+    } catch {
+      setMsg(adminMsg, 'Немає зв’язку з сервером');
+      return null;
+    }
+  }
+
+  async function adminMute(name) {
+    const choice = muteDuration.value;
+    const body = choice === 'forever' ? { username: name, forever: true } : { username: name, minutes: Number(choice) };
+    const data = await adminAction('/api/admin/mute', body, `${name}: мут встановлено`);
+    if (data) setUserMute(data.username, data.mutedUntil);
+  }
+
+  async function adminUnmute(name) {
+    const data = await adminAction('/api/admin/unmute', { username: name }, `${name}: мут знято`);
+    if (data) setUserMute(data.username, null);
+  }
+
+  async function adminDelete(name) {
+    const sure = window.confirm(
+      `Видалити користувача ${name}?\n\nЙого приватні листування буде стерто, а повідомлення в чатах стануть «видаленими». Дію не можна скасувати.`
+    );
+    if (!sure) return;
+    const data = await adminAction('/api/admin/delete-user', { username: name }, `Користувача ${name} видалено`);
+    if (data) removeUser(data.username);
+  }
+
+  adminBtn.addEventListener('click', async () => {
+    adminSearch.value = '';
+    setMsg(adminMsg, '');
+    renderAdminList();
+    adminDialog.showModal();
+    // Підтягуємо свіжі дані (статуси мутів)
+    await loadUsers();
+    renderSidebar();
+    if (adminDialog.open) renderAdminList();
+  });
+
+  adminSearch.addEventListener('input', renderAdminList);
+
+  // ==========================================
   // Socket.IO
   // ==========================================
   async function onConnect() {
@@ -1394,11 +1574,13 @@
     if (visible) markReadSoon();
   }
 
-  function startChatSession(username) {
+  function startChatSession(username, admin) {
     if (sessionStarted) return;
     sessionStarted = true;
 
     currentUser = username;
+    isAdmin = Boolean(admin);
+    adminBtn.classList.toggle('hidden', !isAdmin);
     authForm.classList.add('hidden');
     chatContainer.classList.remove('hidden');
     userDisplay.textContent = username;
@@ -1419,24 +1601,14 @@
     socket.on('onlineUsers', (list) => {
       onlineSet.clear();
       list.forEach((name) => onlineSet.add(name));
+      if (adminDialog.open) renderAdminList();
       renderSidebar();
       updateHeader();
     });
 
     socket.on('userRegistered', ({ username: name }) => ensureUser(name));
 
-    socket.on('userRemoved', ({ username: name }) => {
-      users = users.filter((u) => u.username !== name);
-      chats.delete(`u:${name}`);
-      delete unread[`u:${name}`];
-      if (activeChat === `u:${name}`) {
-        showToast(`Користувач ${name} видалив акаунт`);
-        switchChat('general', { keepMobileList: true });
-      } else {
-        renderSidebar();
-        updateDocumentTitle();
-      }
-    });
+    socket.on('userRemoved', ({ username: name }) => removeUser(name));
 
     socket.on('lastSeen', ({ username: name, at }) => {
       const user = users.find((u) => u.username === name);
@@ -1478,6 +1650,10 @@
 
     socket.on('errorMessage', showToast);
 
+    // Мут: власний стан та оновлення для адміністраторів
+    socket.on('muteState', ({ mutedUntil }) => applyMuteState(mutedUntil));
+    socket.on('muteUpdated', ({ username: name, mutedUntil }) => setUserMute(name, mutedUntil));
+
     // Оновлюємо підписи «був(ла) в мережі» раз на хвилину
     setInterval(() => {
       renderSidebar();
@@ -1491,7 +1667,7 @@
   (async () => {
     try {
       const { ok, data } = await api('/api/me');
-      if (ok && data.authenticated) startChatSession(data.username);
+      if (ok && data.authenticated) startChatSession(data.username, data.isAdmin);
     } catch (err) {
       console.error('Помилка перевірки сесії:', err);
     }

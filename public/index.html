@@ -43,6 +43,7 @@
       <div class="sidebar-header">
         <span class="me">Вітаємо, <strong id="userDisplay"></strong>!</span>
         <span class="header-actions">
+          <button type="button" class="icon-btn hidden" id="adminBtn" title="Адміністрування" aria-label="Адміністрування">🛡️</button>
           <button type="button" class="icon-btn" id="settingsBtn" title="Налаштування" aria-label="Налаштування">⚙️</button>
           <button type="button" class="logout-btn" id="logoutBtn">Вийти</button>
         </span>
@@ -180,6 +181,31 @@
       <button type="submit" class="btn btn-danger">Видалити акаунт</button>
     </form>
 
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secondary" data-close>Закрити</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- Адміністрування (лише для адмінів) -->
+<dialog id="adminDialog" class="modal modal-wide">
+  <div class="modal-body">
+    <h3>🛡️ Адміністрування</h3>
+
+    <label class="field">Тривалість муту
+      <select id="muteDuration">
+        <option value="10">10 хвилин</option>
+        <option value="60">1 година</option>
+        <option value="1440" selected>1 день</option>
+        <option value="10080">7 днів</option>
+        <option value="forever">Назавжди</option>
+      </select>
+    </label>
+
+    <input type="search" id="adminSearch" placeholder="Пошук користувача..." autocomplete="off" aria-label="Пошук користувача">
+    <div id="adminUsers" class="admin-list"></div>
+
+    <p class="form-msg hidden" id="adminMsg" role="alert"></p>
     <div class="modal-actions">
       <button type="button" class="btn btn-secondary" data-close>Закрити</button>
     </div>

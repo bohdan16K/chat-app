@@ -917,6 +917,25 @@ select {
   outline: none;
 }
 
+.modal input[type="search"] {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 16px;
+  outline: none;
+}
+
+.modal input[type="search"]:focus {
+  border-color: var(--primary);
+}
+
+.modal-wide {
+  max-width: 560px;
+}
+
 .modal hr {
   border: none;
   border-top: 1px solid var(--border);
@@ -1008,6 +1027,65 @@ select {
   font-size: 0.9rem;
 }
 
+/* --- Панель адміністратора --- */
+.admin-list {
+  max-height: 50vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.admin-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.admin-row:last-child {
+  border-bottom: none;
+}
+
+.admin-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.admin-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.admin-sub {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.admin-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.btn.btn-small {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 0.8rem;
+}
+
+.chat-form input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.emoji-toggle:disabled,
+.chat-form button[type="submit"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* --- Сповіщення (toast) --- */
 .toast {
   position: fixed;
@@ -1072,6 +1150,10 @@ select {
 
   .message {
     max-width: 88%;
+  }
+
+  .admin-row {
+    flex-wrap: wrap;
   }
 
   .chat-messages {
