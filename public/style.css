@@ -1086,6 +1086,151 @@ select {
   cursor: not-allowed;
 }
 
+/* --- Вкладення --- */
+.msg-image {
+  display: block;
+  max-width: min(320px, 100%);
+  height: auto;
+  margin-bottom: 4px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.2);
+  cursor: zoom-in;
+}
+
+.file-missing {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.2);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+.file-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 100%;
+  margin-bottom: 4px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.2);
+  color: inherit;
+  text-decoration: none;
+}
+
+.file-chip:hover {
+  background: rgba(127, 127, 127, 0.32);
+}
+
+.file-icon {
+  flex-shrink: 0;
+  font-size: 1.6rem;
+}
+
+.file-info {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.file-size {
+  font-size: 0.75rem;
+  opacity: 0.75;
+}
+
+.attach-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 15px;
+  border-top: 1px solid var(--border);
+  border-left: 3px solid var(--online);
+  background: var(--surface);
+}
+
+.attach-icon {
+  flex-shrink: 0;
+  font-size: 1.5rem;
+}
+
+.attach-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.attach-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.attach-sub {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.attach-progress {
+  display: block;
+  width: 100%;
+  height: 6px;
+  margin: 3px 0;
+}
+
+.chat-window.drop-active {
+  outline: 3px dashed var(--primary);
+  outline-offset: -8px;
+}
+
+.image-modal {
+  max-width: min(94vw, 960px);
+  max-height: 94vh;
+  max-height: 94dvh;
+  margin: auto;
+  padding: 0;
+  border: none;
+  border-radius: 12px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.image-modal::backdrop {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.image-modal img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(94vh - 64px);
+  max-height: calc(94dvh - 64px);
+  margin: 0 auto;
+  object-fit: contain;
+  cursor: zoom-out;
+}
+
+.image-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px;
+}
+
+.image-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
 /* --- Сповіщення (toast) --- */
 .toast {
   position: fixed;

@@ -93,11 +93,23 @@
         <button type="button" class="icon-btn" id="composerCancel" title="Скасувати" aria-label="Скасувати">✕</button>
       </div>
 
+      <div class="attach-bar hidden" id="attachBar">
+        <span class="attach-icon" id="attachIcon">📎</span>
+        <div class="attach-info">
+          <div class="attach-name" id="attachName"></div>
+          <progress class="attach-progress hidden" id="attachProgress" max="100" value="0"></progress>
+          <div class="attach-sub" id="attachSub"></div>
+        </div>
+        <button type="button" class="icon-btn" id="attachCancel" title="Прибрати файл" aria-label="Прибрати файл">✕</button>
+      </div>
+
       <div class="emoji-panel hidden" id="emojiPanel"></div>
 
       <form class="chat-form" id="chatForm">
+        <button type="button" class="emoji-toggle" id="attachBtn" title="Прикріпити файл або фото" aria-label="Прикріпити файл або фото">📎</button>
+        <input type="file" id="fileInput" class="hidden" tabindex="-1">
         <button type="button" class="emoji-toggle" id="emojiBtn" title="Емодзі" aria-label="Емодзі">😊</button>
-        <input type="text" id="messageInput" placeholder="Введіть повідомлення..." maxlength="2000" required autocomplete="off">
+        <input type="text" id="messageInput" placeholder="Введіть повідомлення..." maxlength="2000" autocomplete="off">
         <button type="submit">Надіслати</button>
       </form>
     </main>
@@ -209,6 +221,15 @@
     <div class="modal-actions">
       <button type="button" class="btn btn-secondary" data-close>Закрити</button>
     </div>
+  </div>
+</dialog>
+
+<!-- Перегляд фото -->
+<dialog id="imageDialog" class="image-modal">
+  <img id="imageDialogImg" alt="">
+  <div class="image-actions">
+    <a id="imageDialogDownload" class="btn btn-small" href="#" download>⬇ Завантажити</a>
+    <button type="button" class="btn btn-small btn-secondary" data-close>Закрити</button>
   </div>
 </dialog>
 

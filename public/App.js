@@ -77,6 +77,9 @@
   let isAdmin = false;
   let myMutedUntil = null; // Date | null
   let muteTimer = null;
+  let pendingAttachment = null; // завантажений, але ще не надісланий файл
+  let uploading = false;
+  let uploadXhr = null;
 
   const typingMap = new Map(); // "chat|sender" -> { chat, sender, timer }
 
@@ -153,6 +156,19 @@
   const adminSearch = $('adminSearch');
   const adminUsers = $('adminUsers');
   const adminMsg = $('adminMsg');
+
+  const chatWindow = document.querySelector('.chat-window');
+  const attachBtn = $('attachBtn');
+  const fileInput = $('fileInput');
+  const attachBar = $('attachBar');
+  const attachIcon = $('attachIcon');
+  const attachName = $('attachName');
+  const attachSub = $('attachSub');
+  const attachProgress = $('attachProgress');
+  const attachCancel = $('attachCancel');
+  const imageDialog = $('imageDialog');
+  const imageDialogImg = $('imageDialogImg');
+  const imageDialogDownload = $('imageDialogDownload');
 
   // ==========================================
   // Утиліти
@@ -308,7 +324,7 @@
       const g = groupById(key.slice(2));
       title = `${msg.author} · ${g ? g.title : 'Група'}`;
     }
-    showNotification(title, msg.text.slice(0, 120), key);
+    showNotification(title, msg.text ? msg.text.slice(0, 120) : attachmentLabel(msg), key);
   }
 
   // ==========================================
@@ -603,8 +619,9 @@
 
     if (!isSelf && m.kind === 'room') node.appendChild(h('span', 'author', m.author));
     if (!m.deleted && m.replyTo) node.appendChild(makeQuote(m.replyTo));
+    if (!m.deleted && m.attachment) node.appendChild(makeAttachment(m.attachment));
 
-    node.appendChild(h('div', 'text', m.deleted ? 'Повідомлення видалено' : m.text));
+    if (m.deleted || m.text) node.appendChild(h('div', 'text', m.deleted ? 'Повідомлення видалено' : m.text));
 
     const meta = h('div', 'meta');
     if (m.editedAt && !m.deleted) meta.appendChild(h('span', 'edited', 'змінено'));
@@ -913,7 +930,7 @@
     };
 
     addAction('↩ Відповісти', () => startReply(m));
-    addAction('📋 Копіювати', () => copyText(m.text));
+    if (m.text) addAction('📋 Копіювати', () => copyText(m.text));
     if (m.author === currentUser) {
       addAction('✏️ Редагувати', () => startEdit(m));
       addAction('🗑 Видалити', () => deleteMessage(m), true);
@@ -952,7 +969,7 @@
   function startReply(m) {
     if (composer.mode === 'edit') messageInput.value = '';
     composer = { mode: 'reply', msg: m };
-    showComposerBar(`Відповідь для ${m.author}`, m.text);
+    showComposerBar(`Відповідь для ${m.author}`, m.text || attachmentLabel(m));
     messageInput.focus();
   }
 
@@ -1007,6 +1024,7 @@
     unread[key] = 0;
 
     cancelComposer();
+    clearAttachment();
     closeMenu();
     emojiPanel.classList.add('hidden');
 
@@ -1110,10 +1128,17 @@
       return;
     }
 
+    if (uploading) {
+      showToast('Дочекайтесь завершення завантаження файлу');
+      return;
+    }
+
     const text = messageInput.value.trim();
-    if (!text) return;
+    const attachment = composer.mode === 'edit' ? null : pendingAttachment;
+    if (!text && !attachment) return;
 
     if (composer.mode === 'edit') {
+      if (!text) return;
       const target = composer.msg;
       if (text !== target.text) {
         socket.emit('editMessage', { id: target.id, kind: target.kind, text });
@@ -1127,13 +1152,19 @@
     const replyTo = composer.mode === 'reply' ? composer.msg.id : undefined;
 
     if (isUserKey(activeChat)) {
-      socket.emit('privateMessage', { recipient: activeChat.slice(2), text, replyTo });
+      socket.emit('privateMessage', {
+        recipient: activeChat.slice(2),
+        text,
+        replyTo,
+        attachment: attachment ? attachment.id : undefined
+      });
     } else {
       const room = activeChat === 'general' ? 'general' : activeChat.slice(2);
-      socket.emit('chatMessage', { room, text, replyTo });
+      socket.emit('chatMessage', { room, text, replyTo, attachment: attachment ? attachment.id : undefined });
     }
 
     stopTypingNow();
+    resetAttachment();
     composer = { mode: null, msg: null };
     composerBar.classList.add('hidden');
     messageInput.value = '';
@@ -1151,7 +1182,7 @@
     }
   });
 
-  [groupDialog, groupInfoDialog, settingsDialog, adminDialog].forEach((dialog) => {
+  [groupDialog, groupInfoDialog, settingsDialog, adminDialog, imageDialog].forEach((dialog) => {
     dialog.addEventListener('click', (e) => {
       if (e.target === dialog) dialog.close(); // клік по затемненню
     });
@@ -1389,6 +1420,281 @@
   });
 
   // ==========================================
+  // Файли та фото
+  // ==========================================
+  const MAX_FILE_BYTES = 10 * 1024 * 1024; // має збігатися з сервером
+  const IMAGE_MAX_SIDE = 1600;
+  const JPEG_QUALITY = 0.85;
+  const BLOCKED_EXTENSIONS = new Set([
+    'exe', 'bat', 'cmd', 'com', 'scr', 'msi', 'msp', 'dll', 'lnk', 'pif', 'cpl',
+    'js', 'jse', 'mjs', 'vbs', 'vbe', 'wsf', 'wsh', 'ps1', 'psm1', 'sh', 'bash',
+    'jar', 'apk', 'app', 'hta', 'reg', 'iso', 'dmg'
+  ]);
+
+  function formatSize(bytes) {
+    if (bytes < 1024) return `${bytes} Б`;
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} КБ`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} МБ`;
+  }
+
+  function attachmentLabel(m) {
+    if (!m.attachment) return '';
+    return m.attachment.isImage ? '📷 Фото' : `📎 ${m.attachment.name}`;
+  }
+
+  function fileIcon(name) {
+    const ext = (name.split('.').pop() || '').toLowerCase();
+    if (ext === 'pdf') return '📕';
+    if (['doc', 'docx', 'odt', 'rtf', 'txt', 'md'].includes(ext)) return '📝';
+    if (['xls', 'xlsx', 'csv', 'ods'].includes(ext)) return '📊';
+    if (['ppt', 'pptx', 'odp'].includes(ext)) return '📽';
+    if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return '🗜';
+    if (['mp3', 'wav', 'ogg', 'flac', 'm4a'].includes(ext)) return '🎵';
+    if (['mp4', 'mov', 'avi', 'mkv', 'webm'].includes(ext)) return '🎬';
+    return '📎';
+  }
+
+  function openImage(a) {
+    imageDialogImg.src = `/api/files/${a.id}`;
+    imageDialogImg.alt = a.name;
+    imageDialogDownload.href = `/api/files/${a.id}?download=1`;
+    imageDialogDownload.setAttribute('download', a.name);
+    imageDialog.showModal();
+  }
+  imageDialogImg.addEventListener('click', () => imageDialog.close());
+  imageDialog.addEventListener('close', () => imageDialogImg.removeAttribute('src'));
+
+  // Вкладення в повідомленні: фото з прев'ю або «плашка» файлу
+  function makeAttachment(a) {
+    const url = `/api/files/${a.id}`;
+
+    if (a.isImage) {
+      const img = document.createElement('img');
+      img.className = 'msg-image';
+      img.src = url;
+      img.alt = a.name;
+      img.title = a.name;
+      img.loading = 'lazy';
+      if (a.w && a.h) {
+        img.width = a.w; // розміри лише для резервування місця (стиль обмежує ширину)
+        img.height = a.h;
+      }
+      img.addEventListener('click', () => openImage(a));
+      img.addEventListener('error', () => img.replaceWith(h('div', 'file-missing', 'Фото недоступне')));
+      return img;
+    }
+
+    const chip = h('a', 'file-chip');
+    chip.href = `${url}?download=1`;
+    chip.setAttribute('download', a.name);
+    chip.title = 'Завантажити';
+    chip.appendChild(h('span', 'file-icon', fileIcon(a.name)));
+    const info = h('span', 'file-info');
+    info.appendChild(h('span', 'file-name', a.name));
+    info.appendChild(h('span', 'file-size', formatSize(a.size)));
+    chip.appendChild(info);
+    return chip;
+  }
+
+  // --- Панель вкладення над полем вводу ---
+  function showAttachBar(name, sub, progress, isImage) {
+    attachIcon.textContent = isImage ? '📷' : fileIcon(name);
+    attachName.textContent = name;
+    attachSub.textContent = sub;
+    attachProgress.classList.toggle('hidden', progress === null);
+    if (progress !== null) attachProgress.value = progress;
+    attachBar.classList.remove('hidden');
+  }
+
+  function hideAttachBar() {
+    attachBar.classList.add('hidden');
+  }
+
+  // Після надсилання: просто забуваємо вкладення (сервер уже прив'язав файл)
+  function resetAttachment() {
+    pendingAttachment = null;
+    hideAttachBar();
+  }
+
+  // Скасування користувачем / перемикання чату: перериваємо завантаження
+  function clearAttachment() {
+    if (uploading && uploadXhr) uploadXhr.abort();
+    pendingAttachment = null;
+    hideAttachBar();
+    fileInput.value = '';
+  }
+
+  // --- Підготовка зображення: зменшення та стиснення ---
+  async function decodeImage(file) {
+    if (window.createImageBitmap) {
+      try {
+        const bitmap = await createImageBitmap(file);
+        return { source: bitmap, width: bitmap.width, height: bitmap.height, close: () => bitmap.close() };
+      } catch {
+        /* пробуємо запасний шлях */
+      }
+    }
+    // Запасний шлях: data: URL (blob: заборонений політикою безпеки сторінки)
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('decode'));
+      image.src = dataUrl;
+    });
+    return { source: img, width: img.naturalWidth, height: img.naturalHeight, close: () => {} };
+  }
+
+  async function prepareImage(file) {
+    const decoded = await decodeImage(file);
+    try {
+      const { width, height } = decoded;
+      const original = { blob: file, name: file.name, w: width, h: height };
+      const scale = Math.min(1, IMAGE_MAX_SIDE / Math.max(width, height));
+      const resized = scale < 1;
+      const keepLimit = file.type === 'image/png' ? 2 * 1024 * 1024 : 1.5 * 1024 * 1024;
+
+      // GIF не чіпаємо (анімація); невеликі фото теж лишаємо як є
+      if (file.type === 'image/gif' || (!resized && file.size <= keepLimit)) return original;
+
+      const w = Math.max(1, Math.round(width * scale));
+      const hgt = Math.max(1, Math.round(height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = hgt;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff'; // прозорість PNG → білий фон під JPEG
+      ctx.fillRect(0, 0, w, hgt);
+      ctx.drawImage(decoded.source, 0, 0, w, hgt);
+
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', JPEG_QUALITY));
+      if (!blob || (!resized && blob.size >= file.size)) return original;
+
+      return { blob, name: `${file.name.replace(/\.[^.]+$/, '') || 'photo'}.jpg`, w, h: hgt };
+    } finally {
+      decoded.close();
+    }
+  }
+
+  function uploadBlob(blob, name, dims, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      uploadXhr = xhr;
+
+      const params = new URLSearchParams({ name });
+      if (dims) {
+        params.set('w', String(dims.w));
+        params.set('h', String(dims.h));
+      }
+
+      xhr.open('POST', `/api/upload?${params}`);
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = () => {
+        let data = {};
+        try {
+          data = JSON.parse(xhr.responseText);
+        } catch {
+          /* не JSON */
+        }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+        else reject(new Error(data.error || 'Не вдалося завантажити файл'));
+      };
+      xhr.onerror = () => reject(new Error('Немає зв’язку з сервером'));
+      xhr.onabort = () => reject(Object.assign(new Error('cancelled'), { cancelled: true }));
+      xhr.send(blob);
+    });
+  }
+
+  async function selectFile(file) {
+    if (!file || !socket) return;
+    if (isMuted()) return showToast('Вас вимкнено (мут): надсилати файли не можна');
+    if (uploading) return showToast('Дочекайтесь завершення попереднього завантаження');
+
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    if (BLOCKED_EXTENSIONS.has(ext)) {
+      fileInput.value = '';
+      return showToast('Цей тип файлів заборонено з міркувань безпеки');
+    }
+
+    pendingAttachment = null;
+    uploading = true;
+    showAttachBar(file.name, 'Підготовка…', null, false);
+
+    try {
+      let prepared = { blob: file, name: file.name, w: null, h: null };
+      if (/^image\/(jpeg|png|webp|gif)$/.test(file.type)) {
+        try {
+          prepared = await prepareImage(file);
+        } catch {
+          /* не вдалося обробити: завантажимо як є */
+        }
+      }
+      if (prepared.blob.size > MAX_FILE_BYTES) {
+        throw new Error(`Файл завеликий (максимум ${MAX_FILE_BYTES / 1024 / 1024} МБ)`);
+      }
+
+      const isImg = prepared.w !== null;
+      showAttachBar(prepared.name, `${formatSize(prepared.blob.size)} · завантаження…`, 0, isImg);
+      const dims = prepared.w && prepared.h ? { w: prepared.w, h: prepared.h } : null;
+      const data = await uploadBlob(prepared.blob, prepared.name, dims, (p) => {
+        attachProgress.value = p;
+      });
+
+      pendingAttachment = data;
+      showAttachBar(data.name, `${formatSize(data.size)} · готово, натисніть «Надіслати»`, null, data.isImage);
+      messageInput.focus();
+    } catch (err) {
+      pendingAttachment = null;
+      hideAttachBar();
+      if (!err.cancelled) showToast(err.message || 'Не вдалося завантажити файл');
+    } finally {
+      uploading = false;
+      uploadXhr = null;
+      fileInput.value = '';
+    }
+  }
+
+  attachBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => selectFile(fileInput.files[0]));
+  attachCancel.addEventListener('click', clearAttachment);
+
+  // Вставка зображення з буфера обміну (Ctrl+V)
+  messageInput.addEventListener('paste', (e) => {
+    const files = e.clipboardData ? [...e.clipboardData.files] : [];
+    if (files.length) {
+      e.preventDefault();
+      selectFile(files[0]);
+    }
+  });
+
+  // Перетягування файлу у вікно чату
+  const hasFiles = (e) => Boolean(e.dataTransfer) && [...e.dataTransfer.types].includes('Files');
+  ['dragenter', 'dragover'].forEach((type) => {
+    chatWindow.addEventListener(type, (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      chatWindow.classList.add('drop-active');
+    });
+  });
+  chatWindow.addEventListener('dragleave', (e) => {
+    if (!chatWindow.contains(e.relatedTarget)) chatWindow.classList.remove('drop-active');
+  });
+  chatWindow.addEventListener('drop', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    chatWindow.classList.remove('drop-active');
+    selectFile(e.dataTransfer.files[0]);
+  });
+
+  // ==========================================
   // Мут та адміністрування
   // ==========================================
   const FOREVER_YEAR = 9000;
@@ -1413,6 +1719,8 @@
 
     messageInput.disabled = muted;
     emojiBtn.disabled = muted;
+    attachBtn.disabled = muted;
+    if (muted) clearAttachment();
     messageInput.placeholder = muted
       ? `Вас вимкнено (мут) ${formatUntil(myMutedUntil)}`
       : 'Введіть повідомлення...';

@@ -39,7 +39,7 @@ const MAX_GROUP_TITLE = 40;
 const MAX_GROUP_MEMBERS = 50;
 
 // Адміністратори: логіни через кому у змінній середовища, напр. ADMIN_USERNAMES=bohdan,anna
-const ADMIN_USERNAMES =  new Set(
+const ADMIN_USERNAMES = new Set(
   (process.env.ADMIN_USERNAMES || '')
     .split(',')
     .map((s) => s.trim().toLowerCase())
@@ -48,6 +48,16 @@ const ADMIN_USERNAMES =  new Set(
 const isAdminName = (name) => typeof name === 'string' && ADMIN_USERNAMES.has(name.toLowerCase());
 const MUTE_FOREVER = new Date('9999-12-31T00:00:00.000Z');
 const MUTE_MAX_MINUTES = 60 * 24 * 365; // не більше року (далі — «назавжди»)
+
+// Вкладення (зберігаються в MongoDB через GridFS)
+const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 МБ на файл
+const USER_QUOTA_BYTES = 100 * 1024 * 1024; // 100 МБ на користувача (адміни без ліміту)
+const ORPHAN_TTL_MS = 60 * 60 * 1000; // завантажений, але не надісланий файл видаляється через годину
+const BLOCKED_EXTENSIONS = new Set([
+  'exe', 'bat', 'cmd', 'com', 'scr', 'msi', 'msp', 'dll', 'lnk', 'pif', 'cpl',
+  'js', 'jse', 'mjs', 'vbs', 'vbe', 'wsf', 'wsh', 'ps1', 'psm1', 'sh', 'bash',
+  'jar', 'apk', 'app', 'hta', 'reg', 'iso', 'dmg'
+]);
 // Дозволені реакції (мають збігатися з клієнтом)
 const ALLOWED_REACTIONS = new Set([
   '👍', // 👍
@@ -170,11 +180,26 @@ const reactionSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// Вкладення: сам файл лежить у GridFS (колекція attachments.files), тут лише опис
+const attachmentSchema = new mongoose.Schema(
+  {
+    id: { type: String, index: true },
+    name: String,
+    size: Number,
+    mime: String,
+    isImage: Boolean,
+    w: Number,
+    h: Number
+  },
+  { _id: false }
+);
+
 // Повідомлення кімнат: 'general' або id групи
 const messageSchema = new mongoose.Schema({
   room: { type: String, default: 'general', index: true },
   user: { type: String, required: true },
   text: { type: String, default: '', maxlength: MAX_MSG_LENGTH },
+  attachment: { type: attachmentSchema, default: undefined },
   replyTo: { type: replySchema, default: undefined },
   reactions: { type: [reactionSchema], default: [] },
   editedAt: { type: Date, default: null },
@@ -188,6 +213,7 @@ const privateMessageSchema = new mongoose.Schema({
   sender: { type: String, required: true },
   recipient: { type: String, required: true },
   text: { type: String, default: '', maxlength: MAX_MSG_LENGTH },
+  attachment: { type: attachmentSchema, default: undefined },
   replyTo: { type: replySchema, default: undefined },
   reactions: { type: [reactionSchema], default: [] },
   editedAt: { type: Date, default: null },
@@ -221,6 +247,9 @@ const ReadMarker = mongoose.model('ReadMarker', readMarkerSchema);
 
 // username -> Set з ID сокетів
 const onlineUsers = new Map();
+
+// GridFS-кошик для вкладень (створюється після підключення до бази)
+let bucket = null;
 
 // ==========================================
 // Допоміжні функції
@@ -323,11 +352,25 @@ function serializeReply(reply) {
   return { id: reply.id, author: reply.author, text: reply.text || '' };
 }
 
+function serializeAttachment(a) {
+  if (!a || !a.id) return null;
+  return {
+    id: a.id,
+    name: a.name,
+    size: a.size,
+    mime: a.mime,
+    isImage: Boolean(a.isImage),
+    w: a.w || null,
+    h: a.h || null
+  };
+}
+
 function serializeRoomMessage(m) {
   const deleted = Boolean(m.deletedAt);
   return {
     id: String(m._id),
     kind: 'room',
+    attachment: deleted ? null : serializeAttachment(m.attachment),
     room: m.room || 'general',
     author: m.user,
     text: deleted ? '' : m.text,
@@ -344,6 +387,7 @@ function serializePrivateMessage(m) {
   return {
     id: String(m._id),
     kind: 'private',
+    attachment: deleted ? null : serializeAttachment(m.attachment),
     author: m.sender,
     recipient: m.recipient,
     text: deleted ? '' : m.text,
@@ -411,8 +455,127 @@ async function setReadMarkers(usernames, chat) {
   );
 }
 
+// --- Вкладення: допоміжні функції ---
+
+// Визначає формат зображення за перших байтах (довіряти mime від клієнта не можна)
+function sniffImage(buf) {
+  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length >= 6 && buf.toString('ascii', 0, 4) === 'GIF8') return 'image/gif';
+  if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') {
+    return 'image/webp';
+  }
+  return null;
+}
+
+function sanitizeFilename(name) {
+  let clean = String(name || '')
+    .replace(/[\\/\u0000-\u001f\u007f<>:"|?*]/g, '_')
+    .replace(/^\.+/, '')
+    .trim();
+  if (clean.length > 120) {
+    const ext = path.extname(clean).slice(0, 15);
+    clean = clean.slice(0, 120 - ext.length) + ext;
+  }
+  return clean || 'file';
+}
+
+const clampDim = (value) => {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) && n >= 1 && n <= 20000 ? n : null;
+};
+
+const encodeRFC5987 = (value) =>
+  encodeURIComponent(value).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+
+const filesCollection = () => mongoose.connection.db.collection('attachments.files');
+
+// Ліміт завантажень: не більше 10 на хвилину від користувача
+const uploadStamps = new Map();
+function canUpload(username) {
+  const now = Date.now();
+  const list = (uploadStamps.get(username) || []).filter((t) => now - t < 60000);
+  const allowed = list.length < 10;
+  if (allowed) list.push(now);
+  uploadStamps.set(username, list);
+  return allowed;
+}
+
+async function deleteFileSafe(id) {
+  if (!bucket || !isId(id)) return;
+  try {
+    await bucket.delete(new mongoose.Types.ObjectId(id));
+  } catch {
+    /* файл уже видалено */
+  }
+}
+
+// Видаляє файли всіх повідомлень, що відповідають фільтру
+async function purgeAttachments(Model, filter) {
+  if (!bucket) return;
+  const docs = await Model.find({ ...filter, 'attachment.id': { $exists: true, $ne: null } }, 'attachment').lean();
+  for (const doc of docs) await deleteFileSafe(doc.attachment.id);
+}
+
+// Прив'язує завантажений файл до повідомлення (атомарно: один файл — одне повідомлення)
+async function claimAttachment(id, username) {
+  if (!isId(id)) return null;
+  const oid = new mongoose.Types.ObjectId(id);
+  const coll = filesCollection();
+  const result = await coll.updateOne(
+    { _id: oid, 'metadata.owner': username, 'metadata.used': false },
+    { $set: { 'metadata.used': true } }
+  );
+  if (result.modifiedCount !== 1) return null;
+
+  const file = await coll.findOne({ _id: oid });
+  const meta = file.metadata || {};
+  return {
+    id: String(oid),
+    name: file.filename,
+    size: file.length,
+    mime: meta.mime || 'application/octet-stream',
+    isImage: Boolean(meta.isImage),
+    w: meta.w,
+    h: meta.h
+  };
+}
+
+// Хто має право завантажити файл: учасники чату, в якому він надісланий
+async function canAccessFile(username, id) {
+  const [roomMsg, privMsg] = await Promise.all([
+    Message.findOne({ 'attachment.id': id, deletedAt: null }, 'room').lean(),
+    PrivateMessage.findOne({ 'attachment.id': id, deletedAt: null }, 'sender recipient').lean()
+  ]);
+  if (roomMsg) {
+    if (!roomMsg.room || roomMsg.room === 'general') return true;
+    return Boolean(await Group.exists({ _id: roomMsg.room, members: username }));
+  }
+  if (privMsg) return privMsg.sender === username || privMsg.recipient === username;
+  return false;
+}
+
+// Коротка підпис-цитата для повідомлення без тексту
+function attachmentSnippet(a) {
+  if (!a || !a.id) return '';
+  return a.isImage ? '📷 Фото' : `📎 ${a.name}`;
+}
+
+async function cleanupOrphanFiles() {
+  if (!bucket) return;
+  try {
+    const cutoff = new Date(Date.now() - ORPHAN_TTL_MS);
+    const orphans = await bucket.find({ 'metadata.used': false, uploadDate: { $lt: cutoff } }).toArray();
+    for (const file of orphans) await deleteFileSafe(String(file._id));
+    if (orphans.length) console.log(`Видалено незадіяних файлів: ${orphans.length}`);
+  } catch (err) {
+    console.error('Помилка очищення файлів:', err);
+  }
+}
+
 async function deleteGroupData(group) {
   const id = String(group._id);
+  await purgeAttachments(Message, { room: id });
   await Message.deleteMany({ room: id });
   await ReadMarker.deleteMany({ chat: `g:${id}` });
   await Group.deleteOne({ _id: group._id });
@@ -474,13 +637,21 @@ async function computeUnread(user) {
 async function deleteUserData(username) {
   const now = new Date();
 
+  await purgeAttachments(PrivateMessage, { $or: [{ sender: username }, { recipient: username }] });
   await PrivateMessage.deleteMany({ $or: [{ sender: username }, { recipient: username }] });
 
   // Повідомлення в загальному чаті/групах: прибираємо вміст, але лишаємо «дірку» для контексту
+  await purgeAttachments(Message, { user: username, deletedAt: null });
   await Message.updateMany(
     { user: username, deletedAt: null },
-    { $set: { text: '', deletedAt: now, reactions: [] }, $unset: { replyTo: '' } }
+    { $set: { text: '', deletedAt: now, reactions: [], attachment: null }, $unset: { replyTo: '' } }
   );
+
+  // Файли, завантажені користувачем, але не прив'язані до повідомлень
+  if (bucket) {
+    const leftovers = await bucket.find({ 'metadata.owner': username }).toArray();
+    for (const file of leftovers) await deleteFileSafe(String(file._id));
+  }
   // Цитати їхніх повідомлень в чужих відповідях теж очищаємо
   await Message.updateMany({ 'replyTo.author': username }, { $set: { 'replyTo.text': '' } });
   await Message.updateMany(
@@ -929,10 +1100,134 @@ app.post('/api/admin/delete-user', requireAuth, requireAdmin, async (req, res) =
   }
 });
 
+// ==========================================
+// REST API: файли та зображення
+// ==========================================
+
+// Завантаження: тіло запиту — сам файл (Content-Type: application/octet-stream),
+// параметри в адресі: ?name=<ім'я>&w=<ширина>&h=<висота> (останні два лише для зображень).
+// Повертає опис вкладення; прив'язується до повідомлення через socket-подію з полем `attachment`.
+app.post(
+  '/api/upload',
+  requireAuth,
+  express.raw({ type: () => true, limit: MAX_FILE_BYTES }),
+  async (req, res) => {
+    try {
+      const username = req.user.username;
+      if (!bucket) return res.status(503).json({ error: 'Сховище тимчасово недоступне' });
+      if (activeMute(username)) {
+        return res.status(403).json({ error: 'Вас вимкнено (мут): надсилати файли не можна' });
+      }
+      if (!canUpload(username)) {
+        return res.status(429).json({ error: 'Забагато завантажень. Зачекайте хвилину.' });
+      }
+
+      const buf = req.body;
+      if (!Buffer.isBuffer(buf) || buf.length === 0) {
+        return res.status(400).json({ error: 'Порожній файл' });
+      }
+
+      const name = sanitizeFilename(req.query.name);
+      const ext = path.extname(name).slice(1).toLowerCase();
+      if (BLOCKED_EXTENSIONS.has(ext)) {
+        return res.status(400).json({ error: 'Цей тип файлів заборонено з міркувань безпеки' });
+      }
+
+      if (!isAdminName(username)) {
+        const rows = await bucket.find({ 'metadata.owner': username }).project({ length: 1 }).toArray();
+        const used = rows.reduce((sum, f) => sum + (f.length || 0), 0);
+        if (used + buf.length > USER_QUOTA_BYTES) {
+          return res.status(400).json({
+            error: `Ліміт сховища вичерпано (${Math.round(USER_QUOTA_BYTES / 1048576)} МБ). Видаліть старі файли.`
+          });
+        }
+      }
+
+      const imageMime = sniffImage(buf);
+      const metadata = {
+        owner: username,
+        mime: imageMime || 'application/octet-stream',
+        isImage: Boolean(imageMime),
+        used: false
+      };
+      if (imageMime) {
+        const w = clampDim(req.query.w);
+        const h = clampDim(req.query.h);
+        if (w && h) {
+          metadata.w = w;
+          metadata.h = h;
+        }
+      }
+
+      const id = await new Promise((resolve, reject) => {
+        const stream = bucket.openUploadStream(name, { metadata });
+        stream.on('error', reject);
+        stream.on('finish', () => resolve(stream.id));
+        stream.end(buf);
+      });
+
+      res.status(201).json({
+        id: String(id),
+        name,
+        size: buf.length,
+        mime: metadata.mime,
+        isImage: metadata.isImage,
+        w: metadata.w || null,
+        h: metadata.h || null
+      });
+    } catch (err) {
+      console.error('Помилка завантаження файлу:', err);
+      res.status(500).json({ error: 'Не вдалося завантажити файл' });
+    }
+  }
+);
+
+// Віддача файлу: лише учасникам чату, де його надіслано. Фото показуються на сторінці,
+// усе інше завжди завантажується як «application/octet-stream» (без виконання в браузері).
+app.get('/api/files/:id', requireAuth, async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!bucket || !isId(id)) return res.status(404).json({ error: 'Файл не знайдено' });
+
+    const oid = new mongoose.Types.ObjectId(id);
+    const [file] = await bucket.find({ _id: oid }).limit(1).toArray();
+    // Однакова відповідь і для «немає», і для «немає доступу», щоб не розкривати існування файлу
+    if (!file || !(await canAccessFile(req.user.username, id))) {
+      return res.status(404).json({ error: 'Файл не знайдено' });
+    }
+
+    const meta = file.metadata || {};
+    const isImage = Boolean(meta.isImage);
+    const inline = isImage && req.query.download !== '1';
+
+    res.setHeader('Content-Type', isImage ? meta.mime : 'application/octet-stream');
+    res.setHeader('Content-Length', file.length);
+    res.setHeader(
+      'Content-Disposition',
+      `${inline ? 'inline' : 'attachment'}; filename="file"; filename*=UTF-8''${encodeRFC5987(file.filename)}`
+    );
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    const stream = bucket.openDownloadStream(oid);
+    stream.on('error', () => {
+      if (!res.headersSent) res.status(404).end();
+      else res.destroy();
+    });
+    stream.pipe(res);
+  } catch (err) {
+    console.error('Помилка віддачі файлу:', err);
+    if (!res.headersSent) res.status(500).json({ error: 'Не вдалося отримати файл' });
+  }
+});
+
 // Обробник помилок (наприклад, некоректний JSON)
 app.use((err, req, res, next) => {
   if (err && err.type === 'entity.parse.failed') {
     return res.status(400).json({ error: 'Некоректний запит' });
+  }
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: `Файл завеликий (максимум ${Math.round(MAX_FILE_BYTES / 1048576)} МБ)` });
   }
   console.error(err);
   res.status(500).json({ error: 'Внутрішня помилка сервера' });
@@ -992,7 +1287,9 @@ io.on('connection', (socket) => {
     return {
       id: String(target._id),
       author: target.user || target.sender,
-      text: target.deletedAt ? '' : String(target.text).slice(0, REPLY_SNIPPET_LENGTH)
+      text: target.deletedAt
+        ? ''
+        : String(target.text || '').slice(0, REPLY_SNIPPET_LENGTH) || attachmentSnippet(target.attachment)
     };
   }
 
@@ -1003,19 +1300,25 @@ io.on('connection', (socket) => {
     try {
       if (blockedByMute()) return;
       await ready;
-      if (!data || typeof data.text !== 'string') return;
+      if (!data) return;
       const room = typeof data.room === 'string' ? data.room : 'general';
       if (!inRoom(room)) return socket.emit('errorMessage', 'Ви не є учасником цієї групи');
 
-      const text = data.text.trim();
-      if (!text) return;
+      const text = typeof data.text === 'string' ? data.text.trim() : '';
+      const wantsAttachment = isId(data.attachment);
+      if (!text && !wantsAttachment) return;
       if (text.length > MAX_MSG_LENGTH) {
         return socket.emit('errorMessage', `Повідомлення задовге (максимум ${MAX_MSG_LENGTH} символів)`);
       }
       if (!canSend()) return socket.emit('errorMessage', 'Надто часто. Зачекайте кілька секунд.');
 
       const replyTo = await buildReply(Message, { room }, data.replyTo);
-      const doc = await Message.create({ room, user: username, text, replyTo });
+      let attachment;
+      if (wantsAttachment) {
+        attachment = await claimAttachment(data.attachment, username);
+        if (!attachment) return socket.emit('errorMessage', 'Файл не знайдено або вже використано');
+      }
+      const doc = await Message.create({ room, user: username, text, replyTo, attachment });
       emitMessage('message', 'room', doc);
     } catch (err) {
       console.error('Помилка збереження повідомлення:', err);
@@ -1026,11 +1329,12 @@ io.on('connection', (socket) => {
   socket.on('privateMessage', async (data) => {
     try {
       if (blockedByMute()) return;
-      if (!data || typeof data.recipient !== 'string' || typeof data.text !== 'string') return;
+      if (!data || typeof data.recipient !== 'string') return;
 
-      const text = data.text.trim();
+      const text = typeof data.text === 'string' ? data.text.trim() : '';
+      const wantsAttachment = isId(data.attachment);
       const rawRecipient = data.recipient.trim();
-      if (!text || !rawRecipient) return;
+      if ((!text && !wantsAttachment) || !rawRecipient) return;
       if (text.length > MAX_MSG_LENGTH) {
         return socket.emit('errorMessage', `Повідомлення задовге (максимум ${MAX_MSG_LENGTH} символів)`);
       }
@@ -1052,7 +1356,12 @@ io.on('connection', (socket) => {
         },
         data.replyTo
       );
-      const doc = await PrivateMessage.create({ sender: username, recipient, text, replyTo });
+      let attachment;
+      if (wantsAttachment) {
+        attachment = await claimAttachment(data.attachment, username);
+        if (!attachment) return socket.emit('errorMessage', 'Файл не знайдено або вже використано');
+      }
+      const doc = await PrivateMessage.create({ sender: username, recipient, text, replyTo, attachment });
       emitMessage('message', 'private', doc);
     } catch (err) {
       console.error('Помилка приватного повідомлення:', err);
@@ -1104,9 +1413,12 @@ io.on('connection', (socket) => {
       if (!existing) return;
       if (kind === 'room' && !inRoom(existing.room || 'general')) return;
 
+      // Разом із повідомленням видаляється і файл (звільняє місце в сховищі)
+      if (existing.attachment && existing.attachment.id) await deleteFileSafe(existing.attachment.id);
+
       const updated = await Model.findByIdAndUpdate(
         data.id,
-        { $set: { text: '', deletedAt: new Date(), reactions: [] } },
+        { $set: { text: '', deletedAt: new Date(), reactions: [], attachment: null } },
         { new: true }
       );
       // Прибираємо цитати видаленого повідомлення в інших відповідях
@@ -1238,6 +1550,11 @@ async function start() {
 
     await mongoose.connect(MONGO_URI);
     console.log('Успішно підключено до MongoDB');
+
+    // Сховище вкладень (GridFS) та періодичне очищення незадіяних файлів
+    bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'attachments' });
+    cleanupOrphanFiles();
+    setInterval(cleanupOrphanFiles, 30 * 60 * 1000);
 
     // Міграція: старі повідомлення без поля room належать загальному чату
     await Message.updateMany({ room: { $exists: false } }, { $set: { room: 'general' } });
