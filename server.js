@@ -718,7 +718,7 @@ app.post('/api/register', async (req, res) => {
     const newUser = await User.create({ username: cleanUsername, password: hashedPassword });
 
     issueToken(res, newUser, Boolean(rememberMe));
-    io.emit('userRegistered', { username: newUser.username });
+    io.to('admins').emit('userRegistered', { username: newUser.username }); // решта побачить через пошук або листування
 
     res.status(201).json({ success: true, username: newUser.username, isAdmin: isAdminName(newUser.username) });
   } catch (err) {
@@ -889,10 +889,55 @@ app.post('/api/delete-account', requireAuth, async (req, res) => {
 // REST API: користувачі, історія, непрочитані
 // ==========================================
 
+// Контакти: ті, з ким у користувача є приватне листування (в будь-який бік)
+async function contactsOf(username) {
+  const [sentTo, receivedFrom] = await Promise.all([
+    PrivateMessage.distinct('recipient', { sender: username }),
+    PrivateMessage.distinct('sender', { recipient: username })
+  ]);
+  return new Set([...sentTo, ...receivedFrom].filter((name) => name && name !== username));
+}
+
+const escapeRegex = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Пошук користувачів за частиною імені (нових людей у списку немає, доки немає листування)
+app.get('/api/users/search', requireAuth, async (req, res) => {
+  try {
+    const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 20) : '';
+    if (q.length < 2) return res.json([]);
+    const users = await User.find(
+      { username: { $regex: escapeRegex(q), $options: 'i', $ne: req.user.username } },
+      'username lastSeen avatar'
+    )
+      .collation({ locale: 'en', strength: 2 })
+      .sort({ username: 1 })
+      .limit(15)
+      .lean();
+    res.json(
+      users
+        .filter((u) => u.username !== req.user.username)
+        .map((u) => ({
+          username: u.username,
+          isOnline: onlineUsers.has(u.username),
+          lastSeen: u.lastSeen || null,
+          avatar: u.avatar || null
+        }))
+    );
+  } catch (err) {
+    console.error('Помилка пошуку користувачів:', err);
+    res.status(500).json({ error: 'Не вдалося виконати пошук' });
+  }
+});
+
 app.get('/api/users', requireAuth, async (req, res) => {
   try {
     const viewerIsAdmin = isAdminName(req.user.username);
-    const users = await User.find({ username: { $ne: req.user.username } }, 'username lastSeen mutedUntil avatar')
+    const contacts = await contactsOf(req.user.username);
+    // Звичайному користувачу — лише контакти; адміністратору — усі (для керування), з позначкою contact
+    const filter = viewerIsAdmin
+      ? { username: { $ne: req.user.username } }
+      : { username: { $in: [...contacts] } };
+    const users = await User.find(filter, 'username lastSeen mutedUntil avatar')
       .sort({ username: 1 })
       .lean();
     const now = Date.now();
@@ -902,7 +947,8 @@ app.get('/api/users', requireAuth, async (req, res) => {
           username: user.username,
           isOnline: onlineUsers.has(user.username),
           lastSeen: user.lastSeen || null,
-          avatar: user.avatar || null
+          avatar: user.avatar || null,
+          contact: contacts.has(user.username)
         };
         // Статус муту та ознаку адміна бачать лише адміністратори
         if (viewerIsAdmin) {

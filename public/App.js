@@ -59,7 +59,10 @@
   let activeChat = 'general'; // 'general' | 'g:<id>' | 'u:<username>'
   let sessionStarted = false;
 
-  let users = [];  // { username, lastSeen }
+  let users = [];  // { username, lastSeen, contact } — contact: є листування (показується в списку)
+  let searchHits = new Set(); // імена, знайдені пошуком (показуються лише під час пошуку)
+  let searchToken = 0;
+  let searchTimer = null;
   let groups = []; // { id, title, owner, members }
   const onlineSet = new Set();
   const unread = {};            // chatKey -> кількість
@@ -138,6 +141,8 @@
   const groupInfoMembers = $('groupInfoMembers');
   const groupAddSection = $('groupAddSection');
   const groupAddPick = $('groupAddPick');
+  const groupFindInput = $('groupFindInput');
+  const groupAddFindInput = $('groupAddFindInput');
   const groupAddBtn = $('groupAddBtn');
   const groupInfoError = $('groupInfoError');
   const groupLeaveBtn = $('groupLeaveBtn');
@@ -487,7 +492,11 @@
 
     // Користувачі: онлайн вгорі, далі за алфавітом
     const sorted = users
-      .filter((u) => !query || u.username.toLowerCase().includes(query))
+      .filter((u) => {
+        const active = activeChat === `u:${u.username}`;
+        const visible = u.contact || active || (query && searchHits.has(u.username));
+        return visible && (!query || u.username.toLowerCase().includes(query) || active);
+      })
       .sort(
         (a, b) =>
           Number(onlineSet.has(b.username)) - Number(onlineSet.has(a.username)) ||
@@ -506,7 +515,17 @@
       });
     });
     if (!userNodes.length) {
-      userNodes.push(h('div', 'list-note', users.length ? 'Нікого не знайдено' : 'Поки немає інших користувачів'));
+      userNodes.push(
+        h(
+          'div',
+          'list-note',
+          query
+            ? query.length < 2
+              ? 'Введіть щонайменше 2 символи для пошуку людей'
+              : 'Нікого не знайдено'
+            : 'Тут з\u2019являться люди, з якими ви листуєтесь. Знайдіть когось через пошук або в загальному чаті.'
+        )
+      );
     }
     usersList.replaceChildren(...userNodes);
   }
@@ -542,28 +561,90 @@
     chatProfileBtn.classList.toggle('hidden', !isUserKey(activeChat));
   }
 
-  searchInput.addEventListener('input', renderSidebar);
+  searchInput.addEventListener('input', () => {
+    searchHits = new Set();
+    renderSidebar();
+    clearTimeout(searchTimer);
+    const q = searchInput.value.trim();
+    if (q.length < 2) return;
+    const token = ++searchToken;
+    searchTimer = setTimeout(async () => {
+      try {
+        const names = await searchPeople(q);
+        if (token !== searchToken) return;
+        searchHits = new Set(names);
+        renderSidebar();
+      } catch (err) {
+        console.error('Помилка пошуку:', err);
+      }
+    }, 250);
+  });
 
   // ==========================================
   // Користувачі та групи
   // ==========================================
-  function ensureUser(name) {
-    if (!name || name === currentUser || users.some((u) => u.username === name)) return;
-    users.push({ username: name, lastSeen: null, mutedUntil: null, isAdmin: false });
+  // Додає користувача до відомих; contact=true — з'являється в списку (є листування)
+  function ensureUser(name, contact = false) {
+    if (!name || name === currentUser) return;
+    const existing = users.find((u) => u.username === name);
+    if (existing) {
+      if (contact && !existing.contact) {
+        existing.contact = true;
+        renderSidebar();
+      }
+      return;
+    }
+    users.push({ username: name, lastSeen: null, mutedUntil: null, isAdmin: false, contact });
+    if (contact) loadProfileInfo(name);
     renderSidebar();
     if (adminDialog.open) renderAdminList();
+  }
+
+  // Дані користувача, якого ми знаємо лише за іменем (аватар, остання активність)
+  async function loadProfileInfo(name) {
+    try {
+      const { ok, data } = await api(`/api/profile/${encodeURIComponent(name)}`);
+      if (!ok) return;
+      const user = users.find((u) => u.username === name);
+      if (user) user.lastSeen = data.lastSeen;
+      if (data.avatar) avatars.set(name, data.avatar);
+      renderSidebar();
+    } catch {
+      /* не критично */
+    }
+  }
+
+  // Пошук людей на сервері; знайдені додаються до відомих (без показу в списку)
+  async function searchPeople(query) {
+    const { ok, data } = await api(`/api/users/search?q=${encodeURIComponent(query)}`);
+    if (!ok || !Array.isArray(data)) return [];
+    data.forEach((u) => {
+      if (u.username === currentUser) return;
+      const existing = users.find((x) => x.username === u.username);
+      if (existing) {
+        existing.lastSeen = u.lastSeen;
+      } else {
+        users.push({ username: u.username, lastSeen: u.lastSeen, mutedUntil: null, isAdmin: false, contact: false });
+      }
+      if (u.avatar) avatars.set(u.username, u.avatar);
+    });
+    return data.map((u) => u.username).filter((n) => n !== currentUser);
   }
 
   async function loadUsers() {
     try {
       const { ok, data } = await api('/api/users');
       if (!ok) return;
-      users = data.map((u) => ({
+      const fresh = data.map((u) => ({
         username: u.username,
         lastSeen: u.lastSeen,
         mutedUntil: u.mutedUntil || null, // приходить лише адміністраторам
-        isAdmin: Boolean(u.isAdmin)
+        isAdmin: Boolean(u.isAdmin),
+        contact: u.contact !== false // звичайним користувачам сервер віддає лише контакти
       }));
+      // Знайдені пошуком (не контакти) лишаємо, щоб не втратити відкритий чат
+      const kept = users.filter((u) => !u.contact && !fresh.some((f) => f.username === u.username));
+      users = [...fresh, ...kept];
       data.forEach((u) => {
         if (u.avatar) avatars.set(u.username, u.avatar);
         else avatars.delete(u.username);
@@ -869,7 +950,7 @@
 
     if (state.items.some((x) => x.id === m.id) || state.pending.some((x) => x.id === m.id)) return;
 
-    if (m.kind === 'private' && !mine) ensureUser(m.author);
+    if (m.kind === 'private') ensureUser(mine ? m.recipient : m.author, true);
 
     if (state.loaded) state.items.push(m);
     else state.pending.push(m);
@@ -1261,6 +1342,29 @@
     });
   }
 
+  // Пошук людей прямо у вікні групи: нові знайдені додаються до списку, вибір зберігається
+  function bindPickSearch(input, container, namesFn) {
+    let timer = null;
+    input.addEventListener('input', () => {
+      clearTimeout(timer);
+      const q = input.value.trim();
+      if (q.length < 2) return;
+      timer = setTimeout(async () => {
+        try {
+          const found = await searchPeople(q);
+          const checked = new Set(checkedValues(container));
+          const names = [...new Set([...namesFn(), ...checked, ...found])].sort((a, b) => a.localeCompare(b, 'uk'));
+          fillPickList(container, names);
+          container.querySelectorAll('input[type="checkbox"]').forEach((box) => {
+            if (checked.has(box.value)) box.checked = true;
+          });
+        } catch (err) {
+          console.error('Помилка пошуку:', err);
+        }
+      }, 250);
+    });
+  }
+
   const checkedValues = (container) =>
     [...container.querySelectorAll('input[type="checkbox"]:checked')].map((box) => box.value);
 
@@ -1269,10 +1373,11 @@
   // ==========================================
   newGroupBtn.addEventListener('click', () => {
     groupTitleInput.value = '';
+    groupFindInput.value = '';
     setMsg(groupError, '');
     fillPickList(
       groupMembersPick,
-      users.map((u) => u.username).sort((a, b) => a.localeCompare(b, 'uk'))
+      knownNames().sort((a, b) => a.localeCompare(b, 'uk'))
     );
     groupDialog.showModal();
     groupTitleInput.focus();
@@ -1301,6 +1406,15 @@
     }
   });
 
+  const knownNames = () => users.filter((u) => u.contact).map((u) => u.username);
+  bindPickSearch(groupFindInput, groupMembersPick, knownNames);
+  bindPickSearch(groupAddFindInput, groupAddPick, () =>
+    knownNames().filter((name) => {
+      const g = groupById(infoGroupId);
+      return !(g && g.members.includes(name));
+    })
+  );
+
   function fillGroupInfo() {
     const group = groupById(infoGroupId);
     if (!group) return;
@@ -1316,13 +1430,13 @@
       })
     );
 
+    groupAddFindInput.value = '';
     groupAddSection.classList.toggle('hidden', !isOwner);
     groupDeleteBtn.classList.toggle('hidden', !isOwner);
     if (isOwner) {
       fillPickList(
         groupAddPick,
-        users
-          .map((u) => u.username)
+        knownNames()
           .filter((name) => !group.members.includes(name))
           .sort((a, b) => a.localeCompare(b, 'uk'))
       );
@@ -1806,7 +1920,7 @@
     try {
       const { ok, data } = await api(`/api/profile/${encodeURIComponent(name)}`);
       if (profileOf !== name) return; // користувач уже відкрив інший профіль
-      if (!ok) {
+      if (!ok || !data.username) {
         profileBio.textContent = data.error || 'Не вдалося завантажити профіль';
         return;
       }
@@ -1846,7 +1960,9 @@
   profileWriteBtn.addEventListener('click', () => {
     const name = profileOf;
     profileDialog.close();
-    if (name && users.some((u) => u.username === name)) switchChat(`u:${name}`);
+    if (!name || name === currentUser) return;
+    ensureUser(name, false); // людина може бути ще не в списку: відкриваємо чат, у списку з'явиться після листування
+    switchChat(`u:${name}`);
   });
 
   profileEditBtn.addEventListener('click', () => {

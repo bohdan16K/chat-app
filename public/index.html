@@ -127,6 +127,7 @@
       <input type="text" id="groupTitleInput" maxlength="40" placeholder="Наприклад, Друзі" autocomplete="off" required>
     </label>
     <div class="modal-label">Учасники</div>
+    <input type="search" id="groupFindInput" class="pick-find" placeholder="Знайти людину за іменем..." autocomplete="off" aria-label="Знайти людину">
     <div id="groupMembersPick" class="pick-list"></div>
     <p class="form-error hidden" id="groupError" role="alert"></p>
     <div class="modal-actions">
@@ -145,6 +146,7 @@
 
     <div id="groupAddSection" class="hidden">
       <div class="modal-label">Додати учасників</div>
+      <input type="search" id="groupAddFindInput" class="pick-find" placeholder="Знайти людину за іменем..." autocomplete="off" aria-label="Знайти людину">
       <div id="groupAddPick" class="pick-list"></div>
       <button type="button" class="btn" id="groupAddBtn">Додати</button>
     </div>
