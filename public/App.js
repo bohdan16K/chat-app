@@ -77,6 +77,11 @@
   let isAdmin = false;
   let myMutedUntil = null; // Date | null
   let muteTimer = null;
+  const avatars = new Map(); // username -> id файлу аватара
+  let myBio = '';
+  let profileOf = null;     // чий профіль відкрито
+  let profileAvatarDraft;   // undefined — без змін, null — прибрати, string — нове фото
+  let profileUploading = false;
   let pendingAttachment = null; // завантажений, але ще не надісланий файл
   let uploading = false;
   let uploadXhr = null;
@@ -158,6 +163,24 @@
   const adminMsg = $('adminMsg');
 
   const chatWindow = document.querySelector('.chat-window');
+  const myProfileBtn = $('myProfileBtn');
+  const chatProfileBtn = $('chatProfileBtn');
+  const profileDialog = $('profileDialog');
+  const profileAvatar = $('profileAvatar');
+  const profileName = $('profileName');
+  const profileStatus = $('profileStatus');
+  const profileSince = $('profileSince');
+  const profileBio = $('profileBio');
+  const profileForm = $('profileForm');
+  const profileBioInput = $('profileBioInput');
+  const profileCounter = $('profileCounter');
+  const profilePhotoBtn = $('profilePhotoBtn');
+  const profilePhotoRemove = $('profilePhotoRemove');
+  const profileFile = $('profileFile');
+  const profileMsg = $('profileMsg');
+  const profileSave = $('profileSave');
+  const profileWriteBtn = $('profileWriteBtn');
+  const profileEditBtn = $('profileEditBtn');
   const attachBtn = $('attachBtn');
   const fileInput = $('fileInput');
   const attachBar = $('attachBar');
@@ -192,6 +215,27 @@
       /* порожня або не-JSON відповідь */
     }
     return { ok: res.ok, data };
+  }
+
+  // Аватар: фото або літера імені
+  function setAvatarContent(el, name, fileId, srcOverride) {
+    el.replaceChildren();
+    const src = srcOverride || (fileId ? `/api/files/${fileId}` : null);
+    if (src) {
+      const img = document.createElement('img');
+      img.alt = name;
+      img.src = src;
+      img.addEventListener('error', () => el.replaceChildren(document.createTextNode(name.charAt(0))));
+      el.appendChild(img);
+    } else {
+      el.textContent = name.charAt(0);
+    }
+  }
+
+  function makeAvatar(name, fileId, extraClass) {
+    const el = h('span', `avatar${extraClass ? ' ' + extraClass : ''}`);
+    setAvatarContent(el, name, fileId);
+    return el;
   }
 
   function showToast(text) {
@@ -354,7 +398,7 @@
       });
       if (ok && data.success) {
         authPassword.value = '';
-        startChatSession(data.username, data.isAdmin);
+        startChatSession(data.username, data.isAdmin, data);
       } else {
         showAuthError(data.error || 'Сталася помилка');
       }
@@ -387,7 +431,7 @@
     return badge;
   }
 
-  function makeChatItem({ key, icon, online, label, sub, count }) {
+  function makeChatItem({ key, icon, online, label, sub, count, avatarOf }) {
     const item = h('div', `user-item${activeChat === key ? ' active' : ''}`);
     item.setAttribute('role', 'button');
     item.tabIndex = 0;
@@ -397,6 +441,7 @@
       item.appendChild(h('span', 'item-icon', icon));
     } else {
       item.appendChild(h('span', `status-dot${online ? ' online' : ''}`));
+      if (avatarOf) item.appendChild(makeAvatar(label, avatars.get(label) || null));
     }
 
     const main = h('div', 'item-main');
@@ -454,6 +499,7 @@
       return makeChatItem({
         key: `u:${u.username}`,
         online,
+        avatarOf: true,
         label: u.username,
         sub: (isAdmin && isMutedUser(u) ? '🔇 мут · ' : '') + (online ? 'в мережі' : formatLastSeen(u.lastSeen)),
         count: unread[`u:${u.username}`] || 0
@@ -493,6 +539,7 @@
     chatSubtitle.textContent = sub;
     chatSubtitle.classList.toggle('online', online);
     chatInfoBtn.classList.toggle('hidden', !isGroupKey(activeChat));
+    chatProfileBtn.classList.toggle('hidden', !isUserKey(activeChat));
   }
 
   searchInput.addEventListener('input', renderSidebar);
@@ -517,6 +564,10 @@
         mutedUntil: u.mutedUntil || null, // приходить лише адміністраторам
         isAdmin: Boolean(u.isAdmin)
       }));
+      data.forEach((u) => {
+        if (u.avatar) avatars.set(u.username, u.avatar);
+        else avatars.delete(u.username);
+      });
     } catch (err) {
       console.error('Помилка завантаження користувачів:', err);
     }
@@ -617,7 +668,12 @@
     node.dataset.id = m.id;
     node.dataset.created = m.createdAt;
 
-    if (!isSelf && m.kind === 'room') node.appendChild(h('span', 'author', m.author));
+    if (!isSelf && m.kind === 'room') {
+      const author = h('span', 'author clickable', m.author);
+      author.title = 'Відкрити профіль';
+      author.addEventListener('click', () => openProfile(m.author));
+      node.appendChild(author);
+    }
     if (!m.deleted && m.replyTo) node.appendChild(makeQuote(m.replyTo));
     if (!m.deleted && m.attachment) node.appendChild(makeAttachment(m.attachment));
 
@@ -1182,7 +1238,7 @@
     }
   });
 
-  [groupDialog, groupInfoDialog, settingsDialog, adminDialog, imageDialog].forEach((dialog) => {
+  [groupDialog, groupInfoDialog, settingsDialog, adminDialog, imageDialog, profileDialog].forEach((dialog) => {
     dialog.addEventListener('click', (e) => {
       if (e.target === dialog) dialog.close(); // клік по затемненню
     });
@@ -1695,6 +1751,172 @@
   });
 
   // ==========================================
+  // Профіль
+  // ==========================================
+  const AVATAR_SIDE = 256;
+
+  // Квадратна обрізка по центру + стиснення до JPEG
+  async function makeAvatarBlob(file) {
+    const decoded = await decodeImage(file);
+    try {
+      const side = Math.min(decoded.width, decoded.height);
+      const sx = Math.floor((decoded.width - side) / 2);
+      const sy = Math.floor((decoded.height - side) / 2);
+      const out = Math.min(AVATAR_SIDE, side);
+      const canvas = document.createElement('canvas');
+      canvas.width = out;
+      canvas.height = out;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, out, out);
+      ctx.drawImage(decoded.source, sx, sy, side, side, 0, 0, out, out);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.88));
+      if (!blob) throw new Error('encode');
+      return { blob, dataUrl: canvas.toDataURL('image/jpeg', 0.88), size: out };
+    } finally {
+      decoded.close();
+    }
+  }
+
+  function setEditMode(on) {
+    profileForm.classList.toggle('hidden', !on);
+    profileBio.classList.toggle('hidden', on);
+    profileEditBtn.classList.toggle('hidden', on || profileOf !== currentUser);
+  }
+
+  async function openProfile(name) {
+    if (!name) return;
+    profileOf = name;
+    profileAvatarDraft = undefined;
+    setMsg(profileMsg, '');
+    setEditMode(false);
+
+    const self = name === currentUser;
+    profileName.textContent = name;
+    profileStatus.textContent = '';
+    profileStatus.classList.remove('online');
+    profileSince.textContent = '';
+    setAvatarContent(profileAvatar, name, avatars.get(name) || null);
+    profileBio.textContent = self ? myBio || 'Розкажіть про себе' : '…';
+    profileBio.classList.toggle('empty', self ? !myBio : true);
+    profileWriteBtn.classList.toggle('hidden', self);
+    profileEditBtn.classList.toggle('hidden', !self);
+    if (!profileDialog.open) profileDialog.showModal();
+
+    try {
+      const { ok, data } = await api(`/api/profile/${encodeURIComponent(name)}`);
+      if (profileOf !== name) return; // користувач уже відкрив інший профіль
+      if (!ok) {
+        profileBio.textContent = data.error || 'Не вдалося завантажити профіль';
+        return;
+      }
+      if (data.avatar) avatars.set(data.username, data.avatar);
+      else avatars.delete(data.username);
+      if (self) myBio = data.bio;
+      profileName.textContent = data.username;
+      setAvatarContent(profileAvatar, data.username, data.avatar);
+      const online = self || onlineSet.has(data.username) || data.isOnline;
+      profileStatus.textContent = (online ? 'в мережі' : formatLastSeen(data.lastSeen)) + (data.isAdmin ? ' · 👑 адміністратор' : '');
+      profileStatus.classList.toggle('online', Boolean(online));
+      if (data.createdAt) {
+        profileSince.textContent = `З нами з ${new Date(data.createdAt).toLocaleDateString('uk-UA', { year: 'numeric', month: 'long', day: 'numeric' })}`;
+      }
+      profileBio.textContent = data.bio || (self ? 'Розкажіть про себе' : 'Користувач ще нічого не написав про себе');
+      profileBio.classList.toggle('empty', !data.bio);
+    } catch (err) {
+      console.error('Помилка профілю:', err);
+      if (profileOf === name) profileBio.textContent = 'Не вдалося завантажити профіль';
+    }
+  }
+
+  myProfileBtn.addEventListener('click', () => openProfile(currentUser));
+  chatProfileBtn.addEventListener('click', () => {
+    if (isUserKey(activeChat)) openProfile(activeChat.slice(2));
+  });
+  profileAvatar.addEventListener('click', () => {
+    const id = avatars.get(profileOf);
+    if (id && profileForm.classList.contains('hidden')) {
+      openImage({ id, name: `Фото ${profileOf}` });
+    }
+  });
+  profileDialog.addEventListener('close', () => {
+    profileOf = null;
+  });
+
+  profileWriteBtn.addEventListener('click', () => {
+    const name = profileOf;
+    profileDialog.close();
+    if (name && users.some((u) => u.username === name)) switchChat(`u:${name}`);
+  });
+
+  profileEditBtn.addEventListener('click', () => {
+    profileAvatarDraft = undefined;
+    profileBioInput.value = myBio;
+    profileCounter.textContent = `${myBio.length}/300`;
+    setMsg(profileMsg, '');
+    setEditMode(true);
+    profileBioInput.focus();
+  });
+  profileBioInput.addEventListener('input', () => {
+    profileCounter.textContent = `${profileBioInput.value.length}/300`;
+  });
+
+  profilePhotoBtn.addEventListener('click', () => profileFile.click());
+  profileFile.addEventListener('change', async () => {
+    const file = profileFile.files[0];
+    profileFile.value = '';
+    if (!file) return;
+    if (isMuted()) return setMsg(profileMsg, 'Вас вимкнено (мут): змінювати фото не можна');
+    if (!/^image\/(jpeg|png|webp|gif)$/.test(file.type)) {
+      return setMsg(profileMsg, 'Оберіть зображення (JPG, PNG, WebP або GIF)');
+    }
+    profileUploading = true;
+    profileSave.disabled = true;
+    setMsg(profileMsg, 'Завантаження фото…', true);
+    try {
+      const prepared = await makeAvatarBlob(file);
+      const data = await uploadBlob(prepared.blob, 'avatar.jpg', { w: prepared.size, h: prepared.size }, () => {});
+      profileAvatarDraft = data.id;
+      setAvatarContent(profileAvatar, profileOf, null, prepared.dataUrl);
+      setMsg(profileMsg, 'Фото готове — натисніть «Зберегти»', true);
+    } catch (err) {
+      setMsg(profileMsg, err.message || 'Не вдалося завантажити фото');
+    } finally {
+      profileUploading = false;
+      profileSave.disabled = false;
+    }
+  });
+
+  profilePhotoRemove.addEventListener('click', () => {
+    profileAvatarDraft = null;
+    setAvatarContent(profileAvatar, currentUser, null);
+    setMsg(profileMsg, 'Фото буде прибрано після збереження', true);
+  });
+
+  profileForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (profileUploading) return;
+    const body = { bio: profileBioInput.value };
+    if (profileAvatarDraft !== undefined) body.avatar = profileAvatarDraft;
+    profileSave.disabled = true;
+    try {
+      const { ok, data } = await api('/api/profile', { method: 'PUT', body: JSON.stringify(body) });
+      if (!ok) return setMsg(profileMsg, data.error || 'Не вдалося зберегти');
+      myBio = data.bio;
+      if (data.avatar) avatars.set(currentUser, data.avatar);
+      else avatars.delete(currentUser);
+      profileAvatarDraft = undefined;
+      renderSidebar();
+      showToast('Профіль збережено');
+      openProfile(currentUser);
+    } catch {
+      setMsg(profileMsg, 'Немає зв\u2019язку з сервером');
+    } finally {
+      profileSave.disabled = false;
+    }
+  });
+
+  // ==========================================
   // Мут та адміністрування
   // ==========================================
   const FOREVER_YEAR = 9000;
@@ -1882,9 +2104,12 @@
     if (visible) markReadSoon();
   }
 
-  function startChatSession(username, admin) {
+  function startChatSession(username, admin, me) {
     if (sessionStarted) return;
     sessionStarted = true;
+
+    myBio = (me && me.bio) || '';
+    if (me && me.avatar) avatars.set(username, me.avatar);
 
     currentUser = username;
     isAdmin = Boolean(admin);
@@ -1912,6 +2137,15 @@
       if (adminDialog.open) renderAdminList();
       renderSidebar();
       updateHeader();
+    });
+
+    socket.on('profileUpdated', ({ username: name, avatar }) => {
+      if (avatar) avatars.set(name, avatar);
+      else avatars.delete(name);
+      renderSidebar();
+      if (profileDialog.open && profileOf === name && profileForm.classList.contains('hidden')) {
+        setAvatarContent(profileAvatar, name, avatars.get(name) || null);
+      }
     });
 
     socket.on('userRegistered', ({ username: name }) => ensureUser(name));
@@ -1975,7 +2209,7 @@
   (async () => {
     try {
       const { ok, data } = await api('/api/me');
-      if (ok && data.authenticated) startChatSession(data.username, data.isAdmin);
+      if (ok && data.authenticated) startChatSession(data.username, data.isAdmin, data);
     } catch (err) {
       console.error('Помилка перевірки сесії:', err);
     }

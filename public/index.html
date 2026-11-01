@@ -44,6 +44,7 @@
         <span class="me">Вітаємо, <strong id="userDisplay"></strong>!</span>
         <span class="header-actions">
           <button type="button" class="icon-btn hidden" id="adminBtn" title="Адміністрування" aria-label="Адміністрування">🛡️</button>
+          <button type="button" class="icon-btn" id="myProfileBtn" title="Мій профіль" aria-label="Мій профіль">👤</button>
           <button type="button" class="icon-btn" id="settingsBtn" title="Налаштування" aria-label="Налаштування">⚙️</button>
           <button type="button" class="logout-btn" id="logoutBtn">Вийти</button>
         </span>
@@ -79,6 +80,7 @@
           <h3 id="chatTitle">📢 Загальний чат</h3>
           <div class="chat-subtitle" id="chatSubtitle"></div>
         </div>
+        <button type="button" class="icon-btn hidden" id="chatProfileBtn" title="Профіль" aria-label="Профіль">👤</button>
         <button type="button" class="icon-btn hidden" id="chatInfoBtn" title="Про групу" aria-label="Про групу">ℹ️</button>
       </header>
 
@@ -219,6 +221,43 @@
 
     <p class="form-msg hidden" id="adminMsg" role="alert"></p>
     <div class="modal-actions">
+      <button type="button" class="btn btn-secondary" data-close>Закрити</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- Профіль -->
+<dialog id="profileDialog" class="modal">
+  <div class="modal-body">
+    <div class="profile-head">
+      <div id="profileAvatar" class="avatar avatar-xl"></div>
+      <div class="profile-id">
+        <h3 id="profileName"></h3>
+        <div class="profile-status" id="profileStatus"></div>
+        <div class="profile-since" id="profileSince"></div>
+      </div>
+    </div>
+
+    <div class="modal-label">Про себе</div>
+    <p class="profile-bio" id="profileBio"></p>
+
+    <form id="profileForm" class="sub-form hidden">
+      <label class="field">Про себе
+        <textarea id="profileBioInput" rows="4" maxlength="300" placeholder="Розкажіть кілька слів про себе..."></textarea>
+      </label>
+      <div class="profile-counter" id="profileCounter">0/300</div>
+      <div class="profile-photo-actions">
+        <button type="button" class="btn btn-small btn-secondary" id="profilePhotoBtn">📷 Змінити фото</button>
+        <button type="button" class="btn btn-small btn-secondary" id="profilePhotoRemove">Прибрати фото</button>
+        <input type="file" id="profileFile" class="hidden" accept="image/jpeg,image/png,image/webp,image/gif" tabindex="-1">
+      </div>
+      <p class="form-msg hidden" id="profileMsg" role="alert"></p>
+      <button type="submit" class="btn" id="profileSave">Зберегти</button>
+    </form>
+
+    <div class="modal-actions">
+      <button type="button" class="btn hidden" id="profileWriteBtn">💬 Написати</button>
+      <button type="button" class="btn btn-secondary hidden" id="profileEditBtn">✏️ Редагувати</button>
       <button type="button" class="btn btn-secondary" data-close>Закрити</button>
     </div>
   </div>

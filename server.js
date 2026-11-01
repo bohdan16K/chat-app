@@ -28,6 +28,7 @@ if (!JWT_SECRET) {
 }
 
 const MAX_MSG_LENGTH = 2000;
+const MAX_BIO_LENGTH = 300;
 const PAGE_SIZE = 50;
 const PAGE_SIZE_MAX = 100;
 const REPLY_SNIPPET_LENGTH = 140;
@@ -159,7 +160,9 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true },
   createdAt: { type: Date, default: Date.now },
   lastSeen: { type: Date, default: null },
-  mutedUntil: { type: Date, default: null } // мут: до якого моменту не можна писати
+  mutedUntil: { type: Date, default: null }, // мут: до якого моменту не можна писати
+  bio: { type: String, default: '', maxlength: MAX_BIO_LENGTH }, // «про себе»
+  avatar: { type: String, default: null } // id файлу-аватара в GridFS
 });
 const User = mongoose.model('User', userSchema);
 
@@ -543,6 +546,7 @@ async function claimAttachment(id, username) {
 
 // Хто має право завантажити файл: учасники чату, в якому він надісланий
 async function canAccessFile(username, id) {
+  if (await User.exists({ avatar: id })) return true; // аватари бачать усі авторизовані
   const [roomMsg, privMsg] = await Promise.all([
     Message.findOne({ 'attachment.id': id, deletedAt: null }, 'room').lean(),
     PrivateMessage.findOne({ 'attachment.id': id, deletedAt: null }, 'sender recipient').lean()
@@ -750,12 +754,88 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/me', async (req, res) => {
   const user = await authenticate(req.cookies.token);
   if (!user) return res.status(401).json({ authenticated: false });
-  res.json({ authenticated: true, username: user.username, isAdmin: isAdminName(user.username) });
+  res.json({
+    authenticated: true,
+    username: user.username,
+    isAdmin: isAdminName(user.username),
+    bio: user.bio || '',
+    avatar: user.avatar || null
+  });
 });
 
 app.post('/api/logout', (req, res) => {
   res.clearCookie('token');
   res.json({ success: true });
+});
+
+// --- Міні-профіль ---
+app.get('/api/profile/:username', requireAuth, async (req, res) => {
+  try {
+    const name = String(req.params.username || '').slice(0, 40);
+    const user = await findUserCI(name);
+    if (!user) return res.status(404).json({ error: 'Користувача не знайдено' });
+    res.json({
+      username: user.username,
+      bio: user.bio || '',
+      avatar: user.avatar || null,
+      createdAt: user.createdAt || null,
+      isOnline: onlineUsers.has(user.username),
+      lastSeen: user.lastSeen || null,
+      isAdmin: isAdminName(user.username)
+    });
+  } catch (err) {
+    console.error('Помилка профілю:', err);
+    res.status(500).json({ error: 'Не вдалося завантажити профіль' });
+  }
+});
+
+// bio — рядок; avatar — id щойно завантаженого фото, null (прибрати) або відсутнє (не змінювати)
+app.put('/api/profile', requireAuth, async (req, res) => {
+  try {
+    const { bio, avatar } = req.body || {};
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ error: 'Користувача не знайдено' });
+
+    if (bio !== undefined) {
+      if (typeof bio !== 'string') return res.status(400).json({ error: 'Некоректний текст' });
+      const clean = bio.replace(/\r\n/g, '\n').trim();
+      if (clean.length > MAX_BIO_LENGTH) {
+        return res.status(400).json({ error: `Максимум ${MAX_BIO_LENGTH} символів` });
+      }
+      user.bio = clean;
+    }
+
+    let oldAvatar = null;
+    if (avatar !== undefined) {
+      if (avatar === null) {
+        oldAvatar = user.avatar;
+        user.avatar = null;
+      } else {
+        if (!bucket || !isId(avatar)) return res.status(400).json({ error: 'Некоректне фото' });
+        const oid = new mongoose.Types.ObjectId(avatar);
+        const file = await filesCollection().findOne({ _id: oid });
+        if (!file || !file.metadata || file.metadata.owner !== user.username || !file.metadata.isImage) {
+          return res.status(400).json({ error: 'Потрібне щойно завантажене фото' });
+        }
+        if (String(user.avatar) !== avatar) {
+          const claimed = await claimAttachment(avatar, user.username);
+          if (!claimed) return res.status(400).json({ error: 'Це фото вже використано' });
+          oldAvatar = user.avatar;
+          user.avatar = avatar;
+        }
+      }
+    }
+
+    await user.save();
+    if (oldAvatar) await deleteFileSafe(oldAvatar);
+
+    const payload = { username: user.username, avatar: user.avatar || null, bio: user.bio || '' };
+    io.emit('profileUpdated', { username: user.username, avatar: payload.avatar });
+    res.json(payload);
+  } catch (err) {
+    console.error('Помилка збереження профілю:', err);
+    res.status(500).json({ error: 'Не вдалося зберегти профіль' });
+  }
 });
 
 app.post('/api/change-password', requireAuth, async (req, res) => {
@@ -812,7 +892,7 @@ app.post('/api/delete-account', requireAuth, async (req, res) => {
 app.get('/api/users', requireAuth, async (req, res) => {
   try {
     const viewerIsAdmin = isAdminName(req.user.username);
-    const users = await User.find({ username: { $ne: req.user.username } }, 'username lastSeen mutedUntil')
+    const users = await User.find({ username: { $ne: req.user.username } }, 'username lastSeen mutedUntil avatar')
       .sort({ username: 1 })
       .lean();
     const now = Date.now();
@@ -821,7 +901,8 @@ app.get('/api/users', requireAuth, async (req, res) => {
         const item = {
           username: user.username,
           isOnline: onlineUsers.has(user.username),
-          lastSeen: user.lastSeen || null
+          lastSeen: user.lastSeen || null,
+          avatar: user.avatar || null
         };
         // Статус муту та ознаку адміна бачать лише адміністратори
         if (viewerIsAdmin) {
