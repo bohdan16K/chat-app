@@ -2,7 +2,7 @@
 <html lang="uk">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
   <title>Real-Time Chat</title>
   <link rel="stylesheet" href="style.css">
@@ -41,12 +41,12 @@
   <div class="chat-app hidden" id="chatContainer">
     <aside class="sidebar">
       <div class="sidebar-header">
-        <span class="me">Вітаємо, <strong id="userDisplay"></strong>!</span>
+        <span class="me"><span class="hello">Вітаємо, </span><strong id="userDisplay"></strong><span class="hello">!</span></span>
         <span class="header-actions">
           <button type="button" class="icon-btn hidden" id="adminBtn" title="Адміністрування" aria-label="Адміністрування">🛡️</button>
           <button type="button" class="icon-btn" id="myProfileBtn" title="Мій профіль" aria-label="Мій профіль">👤</button>
           <button type="button" class="icon-btn" id="settingsBtn" title="Налаштування" aria-label="Налаштування">⚙️</button>
-          <button type="button" class="logout-btn" id="logoutBtn">Вийти</button>
+          <button type="button" class="logout-btn" id="logoutBtn" title="Вийти" aria-label="Вийти"><span class="btn-text">Вийти</span><span class="btn-icon" aria-hidden="true">🚪</span></button>
         </span>
       </div>
 
@@ -75,7 +75,7 @@
 
     <main class="chat-window">
       <header class="chat-header">
-        <button type="button" class="back-btn" id="backBtn">← Чати</button>
+        <button type="button" class="back-btn" id="backBtn" aria-label="Назад до чатів"><span aria-hidden="true">←</span><span class="btn-text"> Чати</span></button>
         <div class="chat-title-wrap">
           <h3 id="chatTitle">📢 Загальний чат</h3>
           <div class="chat-subtitle" id="chatSubtitle"></div>
@@ -111,8 +111,8 @@
         <button type="button" class="emoji-toggle" id="attachBtn" title="Прикріпити файл або фото" aria-label="Прикріпити файл або фото">📎</button>
         <input type="file" id="fileInput" class="hidden" tabindex="-1">
         <button type="button" class="emoji-toggle" id="emojiBtn" title="Емодзі" aria-label="Емодзі">😊</button>
-        <input type="text" id="messageInput" placeholder="Введіть повідомлення..." maxlength="2000" autocomplete="off">
-        <button type="submit">Надіслати</button>
+        <input type="text" id="messageInput" placeholder="Повідомлення..." maxlength="2000" autocomplete="off">
+        <button type="submit" title="Надіслати" aria-label="Надіслати"><span class="btn-text">Надіслати</span><span class="btn-icon" aria-hidden="true">➤</span></button>
       </form>
     </main>
   </div>

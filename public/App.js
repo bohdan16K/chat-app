@@ -2061,7 +2061,7 @@
     if (muted) clearAttachment();
     messageInput.placeholder = muted
       ? `Вас вимкнено (мут) ${formatUntil(myMutedUntil)}`
-      : 'Введіть повідомлення...';
+      : 'Повідомлення...';
 
     if (muted) {
       cancelComposer();
